@@ -12,7 +12,7 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// 2. 디스코드 클라이언트 생성 (음성 상태 감지 권한 포함)
+// 2. 디스코드 클라이언트 생성
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -36,8 +36,14 @@ for (const file of commandFiles) {
     commandsForRegister.push(command.data.toJSON());
 }
 
-// 🎙️ 전역 음성 세션 메모리 장부
 const voiceSessions = new Map();
+
+// 💡 [핵심] URL 슬래시 겹침 방지 헬퍼 함수
+const getSafeBaseApiUrl = () => {
+    const rawUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+    const cleanUrl = rawUrl.endsWith('/') ? rawUrl.slice(0, -1) : rawUrl;
+    return `${cleanUrl}/api/pokemon`;
+};
 
 // 봇 준비 완료 이벤트
 client.once('ready', async () => {
@@ -48,12 +54,9 @@ client.once('ready', async () => {
         console.log('✅ 슬래시 명령어 등록 완료!');
     } catch (error) { console.error('명령어 등록 에러:', error); }
 
-    // =========================================================
-    // 🔍 [재부팅 동기화] 현재 접속 중인 유저 타이머 일괄 가동!
-    // =========================================================
+    // [재부팅 동기화]
     let activeUserCount = 0;
     const nowSync = Date.now();
-
     client.guilds.cache.forEach(guild => {
         guild.voiceStates.cache.forEach(voiceState => {
             if (!voiceState.member?.user.bot && voiceState.channelId) {
@@ -64,16 +67,21 @@ client.once('ready', async () => {
     });
     console.log(`🔄 [재부팅 동기화] 기존 음성 접속자 ${activeUserCount}명의 파밍 타이머를 가동합니다!`);
 
-    // =========================================================
     // ⏰ [자동 알림] 1분마다 경매 마감 체크
-    // =========================================================
     const AUCTION_CHANNEL_ID = '1494514674547298448'; 
     const announcedAuctions = new Set();
 
     setInterval(async () => {
         try {
-            const baseApiUrl = process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL}/api/pokemon` : 'http://localhost:3000/api';
+            const baseApiUrl = getSafeBaseApiUrl();
             const res = await fetch(`${baseApiUrl}/auction`);
+            
+            // 🛡️ API 통신 실패 방어막
+            if (!res.ok) {
+                console.error(`🚨 [경매 타이머] API 응답 에러: 상태 코드 ${res.status}`);
+                return; 
+            }
+
             const data = await res.json();
             if (!data.success) return;
 
@@ -84,12 +92,11 @@ client.once('ready', async () => {
                 const endAt = new Date(a.end_at).getTime();
                 if (endAt <= now && !announcedAuctions.has(a.id)) {
                     announcedAuctions.add(a.id);
-                    if (now - endAt > 5 * 60 * 1000) continue; // 5분 지난 옛날 건 패스
+                    if (now - endAt > 5 * 60 * 1000) continue;
 
                     const channel = client.channels.cache.get(AUCTION_CHANNEL_ID);
                     if (!channel) continue;
 
-                    // 낙찰자가 있을 때만 방송
                     if (a.highest_bidder_id) {
                         const { data: winner } = await supabase.from('players').select('discord_id').eq('id', a.highest_bidder_id).single();
                         const winnerMention = winner ? `<@${winner.discord_id}>` : '익명의 소환사';
@@ -113,15 +120,12 @@ client.once('ready', async () => {
     }, 60 * 1000);
 });
 
-// =====================================================================
-// 🎙️ [음성 파밍] 누적 시간 시스템 (10분당 5P + 로그 기록)
-// =====================================================================
+// 🎙️ [음성 파밍]
 client.on('voiceStateUpdate', async (oldState, newState) => {
     if (newState.member?.user.bot) return;
     const discordId = newState.member.id;
     const now = Date.now();
 
-    // 1. 입장 (또는 채널 이동 시작)
     if (!oldState.channelId && newState.channelId) {
         if (!voiceSessions.has(discordId)) {
             voiceSessions.set(discordId, { joinedAt: now, accumulated: 0 });
@@ -129,23 +133,19 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
             const session = voiceSessions.get(discordId);
             session.joinedAt = now;
         }
-        console.log(`🎙️ [음성 입장/재개] ${discordId}`);
     }
-    // 2. 완전 퇴장
     else if (oldState.channelId && !newState.channelId) {
         const session = voiceSessions.get(discordId);
         if (session && session.joinedAt) {
             session.accumulated += (now - session.joinedAt);
             session.joinedAt = null;
-            console.log(`🔇 [음성 퇴장] ${discordId} | 누적: ${Math.floor(session.accumulated / 1000)}초`);
         }
     }
 });
 
-// ⏰ 1분마다 누적 시간 검사 및 포인트 지급
 setInterval(async () => {
     const now = Date.now();
-    const REWARD_INTERVAL = 10 * 60 * 1000; // 10분
+    const REWARD_INTERVAL = 10 * 60 * 1000; 
 
     for (const [discordId, session] of voiceSessions.entries()) {
         const guild = client.guilds.cache.first();
@@ -158,29 +158,17 @@ setInterval(async () => {
             currentTotal += (now - session.joinedAt);
         }
 
-        // 10분 돌파 시 보상 지급
         if (currentTotal >= REWARD_INTERVAL) {
             try {
                 const { data: player } = await supabase.from('players').select('id, points').eq('discord_id', discordId).single();
                 if (player) {
                     const amount = 5;
                     const newPoints = (player.points || 0) + amount;
-                    
-                    // DB 포인트 업데이트
                     await supabase.from('players').update({ points: newPoints }).eq('id', player.id);
-                    
-                    // 🌟 포인트 로그 기록
-                    await supabase.from('point_logs').insert({
-                        user_id: player.id,
-                        amount: amount,
-                        reason: '음성 채널 유지 보상 (10분)'
-                    });
-
-                    console.log(`💰 [보상 지급] ${discordId} | +${amount}P | 로그 기록 완료`);
+                    await supabase.from('point_logs').insert({ user_id: player.id, amount: amount, reason: '음성 채널 유지 보상 (10분)' });
                 }
             } catch (e) { console.error('보상 지급 중 에러:', e); }
 
-            // 세션 시간 차감 및 기준점 갱신
             if (member.voice.channelId) {
                 session.joinedAt = now;
                 session.accumulated = currentTotal - REWARD_INTERVAL;
@@ -191,38 +179,34 @@ setInterval(async () => {
     }
 }, 60 * 1000);
 
-// =====================================================================
 // 🤖 상호작용 (명령어, 버튼, 모달) 처리
-// =====================================================================
 client.on('interactionCreate', async interaction => {
-    const baseApiUrl = process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL}/api` : 'http://localhost:3000/api';
+    // 💡 [핵심] 이제 무조건 슬래시 중복 없이 정확한 주소(/api/pokemon)가 들어갑니다.
+    const baseApiUrl = getSafeBaseApiUrl();
 
-    // 1️⃣ 슬래시 명령어
     if (interaction.isChatInputCommand()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.execute(interaction, supabase);
     } 
-    // 2️⃣ 자동완성
     else if (interaction.isAutocomplete()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.autocomplete(interaction, supabase);
     }
-    // 3️⃣ 버튼
     else if (interaction.isButton()) {
-        // 경매 취소
         if (interaction.customId.startsWith('cancel_')) {
             const auctionId = interaction.customId.split('_')[1];
             const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
             if(!player) return;
-            const res = await fetch(`${baseApiUrl}/auction/cancel`, { 
-                method: 'POST', 
-                headers: { 'Content-Type': 'application/json' }, 
-                body: JSON.stringify({ auction_id: auctionId, user_id: player.id }) 
-            });
-            const data = await res.json();
-            if(data.success) await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
+            try {
+                const res = await fetch(`${baseApiUrl}/auction/cancel`, { 
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ auction_id: auctionId, user_id: player.id }) 
+                });
+                if(!res.ok) throw new Error('API 오류');
+                const data = await res.json();
+                if(data.success) await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
+            } catch(e) { console.error(e); }
         }
-        // 입찰 모달 띄우기
         else if (interaction.customId.startsWith('bid_')) {
             const [_, auctionId, minBid] = interaction.customId.split('_');
             const modal = new ModalBuilder().setCustomId(`modal_bid_${auctionId}`).setTitle('경매 입찰');
@@ -230,26 +214,17 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
         
-        // 🌟 [어뷰징 방지 추가] 내정보 버튼 연동
         const commandMap = { 'walk_pet': '산책', 'evolve_pet': '진화', 'open_inventory': '보관함' };
         const targetCmd = commandMap[interaction.customId];
-        
         if (targetCmd) {
-            // 버튼을 누른 사람이 이 메시지를 생성한 주인인지 검사
             if (interaction.message.interaction && interaction.message.interaction.user.id !== interaction.user.id) {
-                return interaction.reply({ 
-                    content: '❌ 남의 정보 창에서는 버튼을 누를 수 없습니다. 직접 `/내정보`를 입력해 주세요!', 
-                    ephemeral: true 
-                });
+                return interaction.reply({ content: '❌ 남의 정보 창에서는 버튼을 누를 수 없습니다.', ephemeral: true });
             }
-
             const cmd = client.commands.get(targetCmd);
             if (cmd) await cmd.execute(interaction, supabase);
         }
     } 
-    // 4️⃣ 모달 폼 제출
     else if (interaction.isModalSubmit()) {
-        // 경매 등록 처리
         if (interaction.customId.startsWith('modal_register_')) {
             await interaction.deferReply({ ephemeral: true });
             const selectedValue = interaction.customId.replace('modal_register_', '');
@@ -262,32 +237,44 @@ client.on('interactionCreate', async interaction => {
                 const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
                 if (!player) return;
 
-                const response = await fetch(`${baseApiUrl}/auction`, { 
-                    method: 'POST', 
-                    headers: { 'Content-Type': 'application/json' }, 
+                const res = await fetch(`${baseApiUrl}/auction`, { 
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, 
                     body: JSON.stringify({ seller_id: player.id, sell_type: type, inventory_item_id: type === 'pokemon' ? targetId : null, item_name: type === 'item' ? targetId : null, quantity: 1, start_price: startPrice, duration_hours: durationHours }) 
                 });
-                const data = await response.json();
+                
+                if (!res.ok) {
+                    return interaction.editReply(`❌ 경매 등록 중 통신 오류가 발생했습니다. (상태 코드: ${res.status})`);
+                }
+
+                const data = await res.json();
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
                     await interaction.channel.send(`📢 **${interaction.member?.displayName || interaction.user.username}** 님이 경매장에 새로운 매물을 등록했습니다!`);
+                } else {
+                    await interaction.editReply(`❌ 등록 실패: ${data.message}`);
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) { 
+                console.error('등록 에러:', e); 
+                interaction.editReply('오류가 발생했습니다.'); 
+            }
         }
-        // 입찰 처리
         else if (interaction.customId.startsWith('modal_bid_')) {
             await interaction.deferReply({ ephemeral: true });
             const auctionId = interaction.customId.split('_')[2];
             const bidAmount = parseInt(interaction.fields.getTextInputValue('bid_amount'));
-            const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
-            const res = await fetch(`${baseApiUrl}/auction/bid`, { 
-                method: 'POST', 
-                headers: { 'Content-Type': 'application/json' }, 
-                body: JSON.stringify({ auction_id: auctionId, bidder_id: player.id, bid_amount: bidAmount }) 
-            });
-            const data = await res.json();
-            if (data.success) await interaction.editReply(`🎉 입찰 성공! 최고 입찰자가 되었습니다.`);
-            else await interaction.editReply(`❌ 실패: ${data.message}`);
+            try {
+                const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
+                const res = await fetch(`${baseApiUrl}/auction/bid`, { 
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ auction_id: auctionId, bidder_id: player.id, bid_amount: bidAmount }) 
+                });
+                if (!res.ok) throw new Error('API 오류');
+                const data = await res.json();
+                if (data.success) await interaction.editReply(`🎉 입찰 성공! 최고 입찰자가 되었습니다.`);
+                else await interaction.editReply(`❌ 실패: ${data.message}`);
+            } catch (e) {
+                interaction.editReply('통신 에러가 발생했습니다.');
+            }
         }
     }
 });

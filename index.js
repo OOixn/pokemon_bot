@@ -36,6 +36,9 @@ for (const file of commandFiles) {
     commandsForRegister.push(command.data.toJSON());
 }
 
+// 🎙️ 전역 음성 세션 메모리 장부
+const voiceSessions = new Map();
+
 // 봇 준비 완료 이벤트
 client.once('ready', async () => {
     console.log(`✅ 로그인 성공! 봇 이름: ${client.user.tag}`);
@@ -46,6 +49,22 @@ client.once('ready', async () => {
     } catch (error) { console.error('명령어 등록 에러:', error); }
 
     // =========================================================
+    // 🔍 [재부팅 동기화] 현재 접속 중인 유저 타이머 일괄 가동!
+    // =========================================================
+    let activeUserCount = 0;
+    const nowSync = Date.now();
+
+    client.guilds.cache.forEach(guild => {
+        guild.voiceStates.cache.forEach(voiceState => {
+            if (!voiceState.member?.user.bot && voiceState.channelId) {
+                voiceSessions.set(voiceState.member.id, { joinedAt: nowSync, accumulated: 0 });
+                activeUserCount++;
+            }
+        });
+    });
+    console.log(`🔄 [재부팅 동기화] 기존 음성 접속자 ${activeUserCount}명의 파밍 타이머를 가동합니다!`);
+
+    // =========================================================
     // ⏰ [자동 알림] 1분마다 경매 마감 체크
     // =========================================================
     const AUCTION_CHANNEL_ID = '1494514674547298448'; 
@@ -53,7 +72,7 @@ client.once('ready', async () => {
 
     setInterval(async () => {
         try {
-            const baseApiUrl = process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL}/api` : 'http://localhost:3000/api';
+            const baseApiUrl = process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL}/api/pokemon` : 'http://localhost:3000/api';
             const res = await fetch(`${baseApiUrl}/auction`);
             const data = await res.json();
             if (!data.success) return;
@@ -65,11 +84,12 @@ client.once('ready', async () => {
                 const endAt = new Date(a.end_at).getTime();
                 if (endAt <= now && !announcedAuctions.has(a.id)) {
                     announcedAuctions.add(a.id);
-                    if (now - endAt > 5 * 60 * 1000) continue;
+                    if (now - endAt > 5 * 60 * 1000) continue; // 5분 지난 옛날 건 패스
 
                     const channel = client.channels.cache.get(AUCTION_CHANNEL_ID);
                     if (!channel) continue;
 
+                    // 낙찰자가 있을 때만 방송
                     if (a.highest_bidder_id) {
                         const { data: winner } = await supabase.from('players').select('discord_id').eq('id', a.highest_bidder_id).single();
                         const winnerMention = winner ? `<@${winner.discord_id}>` : '익명의 소환사';
@@ -96,8 +116,6 @@ client.once('ready', async () => {
 // =====================================================================
 // 🎙️ [음성 파밍] 누적 시간 시스템 (10분당 5P + 로그 기록)
 // =====================================================================
-const voiceSessions = new Map();
-
 client.on('voiceStateUpdate', async (oldState, newState) => {
     if (newState.member?.user.bot) return;
     const discordId = newState.member.id;
@@ -179,14 +197,17 @@ setInterval(async () => {
 client.on('interactionCreate', async interaction => {
     const baseApiUrl = process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL}/api` : 'http://localhost:3000/api';
 
+    // 1️⃣ 슬래시 명령어
     if (interaction.isChatInputCommand()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.execute(interaction, supabase);
     } 
+    // 2️⃣ 자동완성
     else if (interaction.isAutocomplete()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.autocomplete(interaction, supabase);
     }
+    // 3️⃣ 버튼
     else if (interaction.isButton()) {
         // 경매 취소
         if (interaction.customId.startsWith('cancel_')) {
@@ -201,7 +222,7 @@ client.on('interactionCreate', async interaction => {
             const data = await res.json();
             if(data.success) await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
         }
-        // 입찰 모달
+        // 입찰 모달 띄우기
         else if (interaction.customId.startsWith('bid_')) {
             const [_, auctionId, minBid] = interaction.customId.split('_');
             const modal = new ModalBuilder().setCustomId(`modal_bid_${auctionId}`).setTitle('경매 입찰');
@@ -209,14 +230,24 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
         
-        // 내정보 버튼 연동
+        // 🌟 [어뷰징 방지 추가] 내정보 버튼 연동
         const commandMap = { 'walk_pet': '산책', 'evolve_pet': '진화', 'open_inventory': '보관함' };
         const targetCmd = commandMap[interaction.customId];
+        
         if (targetCmd) {
+            // 버튼을 누른 사람이 이 메시지를 생성한 주인인지 검사
+            if (interaction.message.interaction && interaction.message.interaction.user.id !== interaction.user.id) {
+                return interaction.reply({ 
+                    content: '❌ 남의 정보 창에서는 버튼을 누를 수 없습니다. 직접 `/내정보`를 입력해 주세요!', 
+                    ephemeral: true 
+                });
+            }
+
             const cmd = client.commands.get(targetCmd);
             if (cmd) await cmd.execute(interaction, supabase);
         }
     } 
+    // 4️⃣ 모달 폼 제출
     else if (interaction.isModalSubmit()) {
         // 경매 등록 처리
         if (interaction.customId.startsWith('modal_register_')) {
@@ -239,7 +270,7 @@ client.on('interactionCreate', async interaction => {
                 const data = await response.json();
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
-                    await interaction.channel.send(`📢 **${interaction.user.username}** 님이 경매장에 새로운 매물을 등록했습니다!`);
+                    await interaction.channel.send(`📢 **${interaction.member?.displayName || interaction.user.username}** 님이 경매장에 새로운 매물을 등록했습니다!`);
                 }
             } catch (e) { console.error(e); }
         }

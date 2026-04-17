@@ -48,7 +48,6 @@ module.exports = {
         
         const myDiscordId = interaction.user.id;
         const selectedInventoryId = interaction.options.getString('포켓몬');
-        // 🌟 [수정 핵심] 유저의 서버 내 별명을 가져옵니다.
         const userDisplayName = interaction.member.displayName;
 
         try {
@@ -71,6 +70,7 @@ module.exports = {
             const member = interaction.member;
             let roleAssignedText = '';
 
+            // 1. 기존 개별 포켓몬 역할 지급
             if (targetRarities.includes(rarity)) {
                 const roleToAdd = interaction.guild.roles.cache.find(role => role.name === pokemonName);
                 
@@ -80,12 +80,24 @@ module.exports = {
                 } else {
                     roleAssignedText = `\n⚠️ (서버에 **'${pokemonName}'** 역할이 없어 부여하지 못했습니다.)`;
                 }
+
+                // 🌟 2. [추가된 로직] 에픽 또는 전설일 경우 상위 그룹 역할 동시 지급
+                if (rarity === '에픽' || rarity === '전설') {
+                    const groupRoleName = `${rarity}포켓몬`; // '에픽포켓몬' 또는 '전설포켓몬'
+                    const groupRole = interaction.guild.roles.cache.find(role => role.name === groupRoleName);
+
+                    if (groupRole) {
+                        await member.roles.add(groupRole).catch(console.error);
+                        roleAssignedText += `\n🏅 **[@${groupRoleName}]** 역할도 함께 부여되었습니다!`;
+                    } else {
+                        roleAssignedText += `\n⚠️ (서버에 **'${groupRoleName}'** 역할이 없습니다.)`;
+                    }
+                }
             }
 
             const embed = new EmbedBuilder()
                 .setColor(0x00FF00)
                 .setTitle(`🎉 장착 완료!`)
-                // 🌟 username 대신 userDisplayName 사용
                 .setDescription(`**${userDisplayName}**님이 **[${rarity}]** 등급의 **[${pokemonName}]**(을)를 장착하셨습니다!${roleAssignedText}`)
                 .setThumbnail(pokeDict.official_art_url || pokeDict.sprite_url)
                 .setTimestamp();

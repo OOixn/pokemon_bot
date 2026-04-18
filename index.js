@@ -263,27 +263,28 @@ client.on('interactionCreate', async interaction => {
     }
     else if (interaction.isButton()) {
         if (interaction.customId.startsWith('cancel_')) {
-            // ✅ [수정] replace로 접두어 제거 → UUID 전체 보존
             const auctionId = interaction.customId.replace('cancel_', '');
             try {
                 const res = await fetch(`${baseApiUrl}/auction/cancel`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    // ✅ [수정] discord_id 직접 전달 (cancel/route.ts의 신분증 확인 로직이 처리)
                     body: JSON.stringify({ auction_id: auctionId, user_id: interaction.user.id }) 
                 });
-                if(!res.ok) throw new Error('API 오류');
-                const data = await res.json();
-                if(data.success) await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
-                else await interaction.reply({ content: `❌ 취소 실패: ${data.message}`, ephemeral: true });
+                
+                // 🌟 무조건 JSON을 파싱해서 API의 메시지를 꺼냅니다!
+                const data = await res.json().catch(() => ({ success: false, message: '서버 응답 파싱 실패' }));
+                
+                if (data.success) {
+                    await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
+                } else {
+                    await interaction.reply({ content: `❌ 취소 실패: ${data.message}`, ephemeral: true });
+                }
             } catch(e) { console.error(e); }
         }
         else if (interaction.customId.startsWith('bid_')) {
-            // ✅ [수정] "bid_UUID_minBid" 구조에서 UUID(중간)와 minBid(끝)를 안전하게 분리
-            // split('_')은 UUID의 '-'는 건드리지 않으므로 구조는: ['bid', UUID, minBid]
-            const withoutPrefix = interaction.customId.replace('bid_', ''); // "UUID_minBid"
+            const withoutPrefix = interaction.customId.replace('bid_', ''); 
             const lastUnderscore = withoutPrefix.lastIndexOf('_');
-            const auctionId = withoutPrefix.slice(0, lastUnderscore);  // UUID 전체
-            const minBid = withoutPrefix.slice(lastUnderscore + 1);    // minBid
+            const auctionId = withoutPrefix.slice(0, lastUnderscore);  
+            const minBid = withoutPrefix.slice(lastUnderscore + 1);    
             const modal = new ModalBuilder().setCustomId(`modal_bid_${auctionId}`).setTitle('경매 입찰');
             modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bid_amount').setLabel(`입찰 금액 (최소 ${minBid}P)`).setStyle(TextInputStyle.Short).setRequired(true)));
             await interaction.showModal(modal);
@@ -300,14 +301,14 @@ client.on('interactionCreate', async interaction => {
         }
     } 
     else if (interaction.isModalSubmit()) {
+        // ========== [경매 등록 모달] ==========
         if (interaction.customId.startsWith('modal_register_')) {
             await interaction.deferReply({ ephemeral: true });
             const selectedValue = interaction.customId.replace('modal_register_', '');
 
-            // ✅ [수정] indexOf로 첫 번째 '_' 위치만 찾아 type과 targetId를 정확히 분리
             const firstUnderscore = selectedValue.indexOf('_');
-            const type = selectedValue.slice(0, firstUnderscore);      // 'pokemon' 또는 'item'
-            const targetId = selectedValue.slice(firstUnderscore + 1); // UUID 또는 아이템명 전체
+            const type = selectedValue.slice(0, firstUnderscore);      
+            const targetId = selectedValue.slice(firstUnderscore + 1); 
 
             const startPrice = parseInt(interaction.fields.getTextInputValue('start_price'));
             const durationHours = parseInt(interaction.fields.getTextInputValue('duration_hours'));
@@ -322,11 +323,6 @@ client.on('interactionCreate', async interaction => {
             try {
                 const res = await fetch(`${baseApiUrl}/auction`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    // ✅ [핵심 수정] seller_id로 discord_id를 직접 전달
-                    // 기존: player.id(내부UUID)를 보냄 → route.ts의 .or() 쿼리에서
-                    //       UUID 타입 비교가 불안정해 player를 못 찾거나
-                    //       realPlayerId 불일치로 updatedItem.length===0 → 등록 실패
-                    // 수정: discord_id를 보내면 route.ts가 안정적으로 players 조회 후 처리
                     body: JSON.stringify({ 
                         seller_id: interaction.user.id,
                         sell_type: type, 
@@ -338,38 +334,41 @@ client.on('interactionCreate', async interaction => {
                     }) 
                 });
                 
-                if (!res.ok) {
-                    return interaction.editReply(`❌ 경매 등록 중 통신 오류가 발생했습니다. (상태 코드: ${res.status})`);
-                }
-
-                const data = await res.json();
+                // 🌟 핵심: 에러가 나더라도 무조건 JSON을 뜯어서 상세 사유를 꺼냅니다!
+                const data = await res.json().catch(() => ({ success: false, message: `통신 상태 오류 (${res.status})` }));
+                
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
                 } else {
+                    // API에서 보내준 친절한 메시지 (예: 이미 등록된 매물입니다)를 출력
                     await interaction.editReply(`❌ 등록 실패: ${data.message}`);
                 }
             } catch (e) { 
                 console.error('등록 에러:', e); 
-                interaction.editReply('오류가 발생했습니다.'); 
+                interaction.editReply('❌ 시스템 내부 오류가 발생했습니다.'); 
             }
         }
+        // ========== [입찰 모달] ==========
         else if (interaction.customId.startsWith('modal_bid_')) {
             await interaction.deferReply({ ephemeral: true });
-            // ✅ [수정] split('_')[2]는 UUID를 첫 토막만 가져옴 → replace로 전체 UUID 추출
             const auctionId = interaction.customId.replace('modal_bid_', '');
             const bidAmount = parseInt(interaction.fields.getTextInputValue('bid_amount'));
             try {
                 const res = await fetch(`${baseApiUrl}/auction/bid`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    // ✅ [수정] bidder_id도 discord_id로 전달 (bid/route.ts에서 처리)
                     body: JSON.stringify({ auction_id: auctionId, bidder_id: interaction.user.id, bid_amount: bidAmount }) 
                 });
-                if (!res.ok) throw new Error('API 오류');
-                const data = await res.json();
-                if (data.success) await interaction.editReply(`🎉 입찰 성공! 최고 입찰자가 되었습니다.`);
-                else await interaction.editReply(`❌ 실패: ${data.message}`);
+                
+                // 🌟 입찰 시에도 API 메시지를 뜯어옵니다!
+                const data = await res.json().catch(() => ({ success: false, message: '서버 응답 파싱 실패' }));
+                
+                if (data.success) {
+                    await interaction.editReply(`🎉 입찰 성공! 최고 입찰자가 되었습니다.`);
+                } else {
+                    await interaction.editReply(`❌ 입찰 실패: ${data.message}`);
+                }
             } catch (e) {
-                interaction.editReply('통신 에러가 발생했습니다.');
+                interaction.editReply('❌ 통신 에러가 발생했습니다.');
             }
         }
     }

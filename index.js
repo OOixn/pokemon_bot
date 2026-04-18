@@ -263,21 +263,27 @@ client.on('interactionCreate', async interaction => {
     }
     else if (interaction.isButton()) {
         if (interaction.customId.startsWith('cancel_')) {
-            const auctionId = interaction.customId.split('_')[1];
-            const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
-            if(!player) return;
+            // ✅ [수정] replace로 접두어 제거 → UUID 전체 보존
+            const auctionId = interaction.customId.replace('cancel_', '');
             try {
                 const res = await fetch(`${baseApiUrl}/auction/cancel`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ auction_id: auctionId, user_id: player.id }) 
+                    // ✅ [수정] discord_id 직접 전달 (cancel/route.ts의 신분증 확인 로직이 처리)
+                    body: JSON.stringify({ auction_id: auctionId, user_id: interaction.user.id }) 
                 });
                 if(!res.ok) throw new Error('API 오류');
                 const data = await res.json();
                 if(data.success) await interaction.update({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('판매 취소됨').setDescription('매물이 보관함으로 반환되었습니다.')], components: [] });
+                else await interaction.reply({ content: `❌ 취소 실패: ${data.message}`, ephemeral: true });
             } catch(e) { console.error(e); }
         }
         else if (interaction.customId.startsWith('bid_')) {
-            const [_, auctionId, minBid] = interaction.customId.split('_');
+            // ✅ [수정] "bid_UUID_minBid" 구조에서 UUID(중간)와 minBid(끝)를 안전하게 분리
+            // split('_')은 UUID의 '-'는 건드리지 않으므로 구조는: ['bid', UUID, minBid]
+            const withoutPrefix = interaction.customId.replace('bid_', ''); // "UUID_minBid"
+            const lastUnderscore = withoutPrefix.lastIndexOf('_');
+            const auctionId = withoutPrefix.slice(0, lastUnderscore);  // UUID 전체
+            const minBid = withoutPrefix.slice(lastUnderscore + 1);    // minBid
             const modal = new ModalBuilder().setCustomId(`modal_bid_${auctionId}`).setTitle('경매 입찰');
             modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bid_amount').setLabel(`입찰 금액 (최소 ${minBid}P)`).setStyle(TextInputStyle.Short).setRequired(true)));
             await interaction.showModal(modal);
@@ -297,18 +303,39 @@ client.on('interactionCreate', async interaction => {
         if (interaction.customId.startsWith('modal_register_')) {
             await interaction.deferReply({ ephemeral: true });
             const selectedValue = interaction.customId.replace('modal_register_', '');
-            const [type, ...rest] = selectedValue.split('_');
-            const targetId = rest.join('_');
+
+            // ✅ [수정] indexOf로 첫 번째 '_' 위치만 찾아 type과 targetId를 정확히 분리
+            const firstUnderscore = selectedValue.indexOf('_');
+            const type = selectedValue.slice(0, firstUnderscore);      // 'pokemon' 또는 'item'
+            const targetId = selectedValue.slice(firstUnderscore + 1); // UUID 또는 아이템명 전체
+
             const startPrice = parseInt(interaction.fields.getTextInputValue('start_price'));
             const durationHours = parseInt(interaction.fields.getTextInputValue('duration_hours'));
 
-            try {
-                const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
-                if (!player) return;
+            if (!['6', '12', '24'].includes(String(durationHours))) {
+                return interaction.editReply('❌ 진행 시간은 6, 12, 24 중 하나여야 합니다.');
+            }
+            if (isNaN(startPrice) || startPrice <= 0) {
+                return interaction.editReply('❌ 시작 가격을 올바르게 입력해주세요.');
+            }
 
+            try {
                 const res = await fetch(`${baseApiUrl}/auction`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ seller_id: player.id, sell_type: type, inventory_item_id: type === 'pokemon' ? targetId : null, item_name: type === 'item' ? targetId : null, quantity: 1, start_price: startPrice, duration_hours: durationHours }) 
+                    // ✅ [핵심 수정] seller_id로 discord_id를 직접 전달
+                    // 기존: player.id(내부UUID)를 보냄 → route.ts의 .or() 쿼리에서
+                    //       UUID 타입 비교가 불안정해 player를 못 찾거나
+                    //       realPlayerId 불일치로 updatedItem.length===0 → 등록 실패
+                    // 수정: discord_id를 보내면 route.ts가 안정적으로 players 조회 후 처리
+                    body: JSON.stringify({ 
+                        seller_id: interaction.user.id,
+                        sell_type: type, 
+                        inventory_item_id: type === 'pokemon' ? targetId : null, 
+                        item_name: type === 'item' ? targetId : null, 
+                        quantity: 1, 
+                        start_price: startPrice, 
+                        duration_hours: durationHours 
+                    }) 
                 });
                 
                 if (!res.ok) {
@@ -318,8 +345,6 @@ client.on('interactionCreate', async interaction => {
                 const data = await res.json();
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
-                    // 🌟 [수정 포인트] 여기서 억지로 채널에 메시지를 보내던 코드를 삭제했습니다! 
-                    // 이제 위쪽에 새로 만든 실시간 리스너가 알아서 전파합니다.
                 } else {
                     await interaction.editReply(`❌ 등록 실패: ${data.message}`);
                 }
@@ -330,13 +355,14 @@ client.on('interactionCreate', async interaction => {
         }
         else if (interaction.customId.startsWith('modal_bid_')) {
             await interaction.deferReply({ ephemeral: true });
-            const auctionId = interaction.customId.split('_')[2];
+            // ✅ [수정] split('_')[2]는 UUID를 첫 토막만 가져옴 → replace로 전체 UUID 추출
+            const auctionId = interaction.customId.replace('modal_bid_', '');
             const bidAmount = parseInt(interaction.fields.getTextInputValue('bid_amount'));
             try {
-                const { data: player } = await supabase.from('players').select('id').eq('discord_id', interaction.user.id).single();
                 const res = await fetch(`${baseApiUrl}/auction/bid`, { 
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ auction_id: auctionId, bidder_id: player.id, bid_amount: bidAmount }) 
+                    // ✅ [수정] bidder_id도 discord_id로 전달 (bid/route.ts에서 처리)
+                    body: JSON.stringify({ auction_id: auctionId, bidder_id: interaction.user.id, bid_amount: bidAmount }) 
                 });
                 if (!res.ok) throw new Error('API 오류');
                 const data = await res.json();

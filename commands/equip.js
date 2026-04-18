@@ -19,7 +19,13 @@ module.exports = {
             const { data: player } = await supabase.from('players').select('id').eq('discord_id', myDiscordId).single();
             if (!player) return await interaction.respond([]);
 
-            const { data: invData } = await supabase.from('user_inventory').select('id, level, pokemon_id').eq('user_id', player.id);
+            // 🌟 [자동완성 필터링] 경매 중(status: auction)이 아닌 포켓몬만 검색 목록에 표시
+            const { data: invData } = await supabase
+                .from('user_inventory')
+                .select('id, level, pokemon_id')
+                .eq('user_id', player.id)
+                .neq('status', 'auction'); // 경매 중인 것 제외
+
             if (!invData || invData.length === 0) return await interaction.respond([]);
             
             const { data: dictData } = await supabase.from('pokemon_dict').select('id, name_ko');
@@ -44,19 +50,46 @@ module.exports = {
     },
 
     async execute(interaction, supabase) {
-        await interaction.deferReply();
+        await interaction.deferReply({ ephemeral: true });
         
         const myDiscordId = interaction.user.id;
         const selectedInventoryId = interaction.options.getString('포켓몬');
         const userDisplayName = interaction.member.displayName;
 
         try {
+            // 1. 유저 확인
             const { data: player } = await supabase.from('players').select('id').eq('discord_id', myDiscordId).single();
             if (!player) return interaction.editReply('❌ 연동된 계정 정보가 없습니다.');
             const myPlayerId = player.id;
 
-            const { data: targetItem } = await supabase.from('user_inventory').select('*').eq('id', selectedInventoryId).eq('user_id', myPlayerId).single();
+            // 2. 포켓몬 정보 및 상태 확인
+            const { data: targetItem } = await supabase
+                .from('user_inventory')
+                .select('*')
+                .eq('id', selectedInventoryId)
+                .eq('user_id', myPlayerId)
+                .single();
+
             if (!targetItem) return interaction.editReply('❌ 해당 포켓몬을 찾을 수 없습니다.');
+
+            // 🌟 [핵심 방어 1] 인벤토리 status가 'auction'인지 확인
+            if (targetItem.status === 'auction') {
+                return interaction.editReply('❌ **경매장에 등록된 포켓몬은 장착할 수 없습니다.**\n먼저 경매를 취소하거나 마감될 때까지 기다려주세요.');
+            }
+
+            // 🌟 [핵심 방어 2] 실제 경매 테이블에 활성화된 매물이 있는지 교차 검증
+            const { data: activeAuction } = await supabase
+                .from('auctions')
+                .select('id')
+                .eq('inventory_item_id', selectedInventoryId)
+                .eq('status', 'active')
+                .maybeSingle();
+
+            if (activeAuction) {
+                // DB 상태가 꼬였을 경우를 대비해 여기서 다시 status를 auction으로 바로잡아줍니다.
+                await supabase.from('user_inventory').update({ status: 'auction' }).eq('id', selectedInventoryId);
+                return interaction.editReply('❌ **현재 경매가 진행 중인 포켓몬입니다.** 장착이 불가능합니다.');
+            }
 
             const { data: pokeDict } = await supabase.from('pokemon_dict').select('name_ko, rarity, official_art_url, sprite_url').eq('id', targetItem.pokemon_id).single();
             
@@ -64,13 +97,14 @@ module.exports = {
             const rarity = pokeDict.rarity || '일반';
             const targetRarities = ['에픽', '전설', '환상', '히든'];
 
+            // 3. 상태 업데이트 (기존 장착 해제 -> 새 포켓몬 장착)
             await supabase.from('user_inventory').update({ status: 'idle' }).eq('user_id', myPlayerId).eq('status', 'equipped');
             await supabase.from('user_inventory').update({ status: 'equipped' }).eq('id', selectedInventoryId);
 
             const member = interaction.member;
             let roleAssignedText = '';
 
-            // 1. 기존 개별 포켓몬 역할 지급
+            // 4. 역할 지급 로직
             if (targetRarities.includes(rarity)) {
                 const roleToAdd = interaction.guild.roles.cache.find(role => role.name === pokemonName);
                 
@@ -81,16 +115,13 @@ module.exports = {
                     roleAssignedText = `\n⚠️ (서버에 **'${pokemonName}'** 역할이 없어 부여하지 못했습니다.)`;
                 }
 
-                // 🌟 2. [추가된 로직] 에픽 또는 전설일 경우 상위 그룹 역할 동시 지급
                 if (rarity === '에픽' || rarity === '전설') {
-                    const groupRoleName = `${rarity}포켓몬`; // '에픽포켓몬' 또는 '전설포켓몬'
+                    const groupRoleName = `${rarity}포켓몬`;
                     const groupRole = interaction.guild.roles.cache.find(role => role.name === groupRoleName);
 
                     if (groupRole) {
                         await member.roles.add(groupRole).catch(console.error);
                         roleAssignedText += `\n🏅 **[@${groupRoleName}]** 역할도 함께 부여되었습니다!`;
-                    } else {
-                        roleAssignedText += `\n⚠️ (서버에 **'${groupRoleName}'** 역할이 없습니다.)`;
                     }
                 }
             }

@@ -6,7 +6,7 @@ module.exports = {
         .setDescription('나의 포켓몬 상태와 보유 자산을 확인합니다.'),
 
     async execute(interaction, supabase) {
-        await interaction.deferReply(); 
+        await interaction.deferReply({ ephemeral: true }); 
         const myDiscordId = interaction.user.id;
         
         // 🌟 [변경] 서버 내에서 설정한 '서버 별명'을 최우선으로 가져옵니다!

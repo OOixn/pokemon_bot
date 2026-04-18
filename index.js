@@ -38,7 +38,7 @@ for (const file of commandFiles) {
 
 const voiceSessions = new Map();
 
-// 💡 [핵심] URL 슬래시 겹침 방지 헬퍼 함수
+// 💡 URL 슬래시 겹침 방지 헬퍼 함수
 const getSafeBaseApiUrl = () => {
     const rawUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
     const cleanUrl = rawUrl.endsWith('/') ? rawUrl.slice(0, -1) : rawUrl;
@@ -54,7 +54,7 @@ client.once('ready', async () => {
         console.log('✅ 슬래시 명령어 등록 완료!');
     } catch (error) { console.error('명령어 등록 에러:', error); }
 
-    // [재부팅 동기화]
+    // 🔄 [재부팅 동기화]
     let activeUserCount = 0;
     const nowSync = Date.now();
     client.guilds.cache.forEach(guild => {
@@ -67,20 +67,90 @@ client.once('ready', async () => {
     });
     console.log(`🔄 [재부팅 동기화] 기존 음성 접속자 ${activeUserCount}명의 파밍 타이머를 가동합니다!`);
 
-    // ⏰ [자동 알림] 1분마다 경매 마감 체크
+    const GUILD_ID = process.env.DISCORD_GUILD_ID;
     const AUCTION_CHANNEL_ID = '1494514674547298448'; 
-    const announcedAuctions = new Set();
 
+    // 📡 [리스너 1] 웹 장착 감지 및 디스코드 역할 지급
+    if (GUILD_ID) {
+        supabase.channel('equip-listener')
+            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'user_inventory', filter: 'status=eq.equipped' },
+                async (payload) => {
+                    try {
+                        const { user_id, pokemon_id } = payload.new;
+                        const { data: player } = await supabase.from('players').select('discord_id').eq('id', user_id).single();
+                        const { data: pokeDict } = await supabase.from('pokemon_dict').select('name_ko, rarity').eq('id', pokemon_id).single();
+
+                        if (!player || !pokeDict) return;
+                        const guild = client.guilds.cache.get(GUILD_ID);
+                        if (!guild) return;
+                        const member = await guild.members.fetch(player.discord_id).catch(() => null);
+                        if (!member) return;
+
+                        const pokemonName = pokeDict.name_ko;
+                        const rarity = pokeDict.rarity || '일반';
+                        const targetRarities = ['에픽', '전설', '환상', '히든'];
+
+                        if (targetRarities.includes(rarity)) {
+                            const roleToAdd = guild.roles.cache.find(role => role.name === pokemonName);
+                            if (roleToAdd) await member.roles.add(roleToAdd).catch(console.error);
+
+                            if (rarity === '에픽' || rarity === '전설') {
+                                const groupRoleName = `${rarity}포켓몬`;
+                                const groupRole = guild.roles.cache.find(role => role.name === groupRoleName);
+                                if (groupRole) await member.roles.add(groupRole).catch(console.error);
+                            }
+                        }
+                    } catch (error) { console.error('🚨 웹 장착 감지 에러:', error); }
+                }
+            ).subscribe();
+    }
+
+    // 📡 [새로운 리스너 2] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
+    supabase.channel('auction-insert-listener')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'auctions' },
+            async (payload) => {
+                try {
+                    const auction = payload.new;
+                    const channel = client.channels.cache.get(AUCTION_CHANNEL_ID);
+                    if (!channel) return;
+
+                    const { data: seller } = await supabase.from('players').select('discord_id').eq('id', auction.seller_id).single();
+                    if (!seller) return;
+
+                    let itemName = auction.item_name;
+                    let rarity = '아이템';
+                    let thumb = null;
+
+                    if (auction.sell_type === 'pokemon') {
+                        const { data: inv } = await supabase.from('user_inventory').select('pokemon:pokemon_dict(name_ko, rarity, official_art_url, sprite_url)').eq('id', auction.inventory_item_id).single();
+                        if (inv && inv.pokemon) {
+                            const pokeData = Array.isArray(inv.pokemon) ? inv.pokemon[0] : inv.pokemon;
+                            itemName = pokeData.name_ko;
+                            rarity = pokeData.rarity || '일반';
+                            thumb = pokeData.official_art_url || pokeData.sprite_url;
+                        }
+                    }
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0x00FF00)
+                        .setTitle('🛒 경매장 새 매물 등록!')
+                        .setDescription(`<@${seller.discord_id}>님이 새로운 매물을 등록했습니다!\n\n**[${rarity}] ${itemName}**\n💰 시작가: **${auction.start_price.toLocaleString()} P**\n⏳ 마감: <t:${Math.floor(new Date(auction.end_at).getTime() / 1000)}:R>`)
+                        .setTimestamp();
+
+                    if (thumb) embed.setThumbnail(thumb);
+
+                    await channel.send({ content: `📢 **새로운 경매 매물 등록**`, embeds: [embed] });
+                } catch (error) { console.error('🚨 경매 등록 알림 에러:', error); }
+            }
+        ).subscribe();
+
+    // ⏰ [자동 알림] 1분마다 경매 마감 체크
+    const announcedAuctions = new Set();
     setInterval(async () => {
         try {
             const baseApiUrl = getSafeBaseApiUrl();
             const res = await fetch(`${baseApiUrl}/auction`);
-            
-            // 🛡️ API 통신 실패 방어막
-            if (!res.ok) {
-                console.error(`🚨 [경매 타이머] API 응답 에러: 상태 코드 ${res.status}`);
-                return; 
-            }
+            if (!res.ok) return;
 
             const data = await res.json();
             if (!data.success) return;
@@ -181,7 +251,6 @@ setInterval(async () => {
 
 // 🤖 상호작용 (명령어, 버튼, 모달) 처리
 client.on('interactionCreate', async interaction => {
-    // 💡 [핵심] 이제 무조건 슬래시 중복 없이 정확한 주소(/api/pokemon)가 들어갑니다.
     const baseApiUrl = getSafeBaseApiUrl();
 
     if (interaction.isChatInputCommand()) {
@@ -249,7 +318,8 @@ client.on('interactionCreate', async interaction => {
                 const data = await res.json();
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
-                    await interaction.channel.send(`📢 **${interaction.member?.displayName || interaction.user.username}** 님이 경매장에 새로운 매물을 등록했습니다!`);
+                    // 🌟 [수정 포인트] 여기서 억지로 채널에 메시지를 보내던 코드를 삭제했습니다! 
+                    // 이제 위쪽에 새로 만든 실시간 리스너가 알아서 전파합니다.
                 } else {
                     await interaction.editReply(`❌ 등록 실패: ${data.message}`);
                 }

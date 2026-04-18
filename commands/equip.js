@@ -72,23 +72,24 @@ module.exports = {
 
             if (!targetItem) return interaction.editReply('❌ 해당 포켓몬을 찾을 수 없습니다.');
 
-            // 🌟 [핵심 방어 1] 인벤토리 status가 'auction'인지 확인
-            if (targetItem.status === 'auction') {
-                return interaction.editReply('❌ **경매장에 등록된 포켓몬은 장착할 수 없습니다.**\n먼저 경매를 취소하거나 마감될 때까지 기다려주세요.');
-            }
-
-            // 🌟 [핵심 방어 2] 실제 경매 테이블에 활성화된 매물이 있는지 교차 검증
+            // 🌟 [수정된 핵심 방어] 실제 경매 테이블 교차 검증 (판매자와 구매자 구분)
             const { data: activeAuction } = await supabase
                 .from('auctions')
-                .select('id')
+                .select('id, seller_id') // 💡 판매자의 ID를 함께 불러와서 검증
                 .eq('inventory_item_id', selectedInventoryId)
                 .eq('status', 'active')
                 .maybeSingle();
 
-            if (activeAuction) {
-                // DB 상태가 꼬였을 경우를 대비해 여기서 다시 status를 auction으로 바로잡아줍니다.
+            // 1) 내가 '판매자'일 때만 장착 차단 (꼼수 원천 차단)
+            if (activeAuction && activeAuction.seller_id === myPlayerId) {
+                // DB 상태가 꼬여있었다면 바로잡아줍니다.
                 await supabase.from('user_inventory').update({ status: 'auction' }).eq('id', selectedInventoryId);
-                return interaction.editReply('❌ **현재 경매가 진행 중인 포켓몬입니다.** 장착이 불가능합니다.');
+                return interaction.editReply('❌ **경매장에 등록된 포켓몬은 장착할 수 없습니다.**\n먼저 경매를 취소하거나 마감될 때까지 기다려주세요.');
+            }
+
+            // 2) 구매자이거나 정상적인 포켓몬인데, 이전 버그 때문에 상태가 'auction'으로 굳어버린 경우 자동 복구(Heal)
+            if (targetItem.status === 'auction') {
+                await supabase.from('user_inventory').update({ status: 'idle' }).eq('id', selectedInventoryId);
             }
 
             const { data: pokeDict } = await supabase.from('pokemon_dict').select('name_ko, rarity, official_art_url, sprite_url').eq('id', targetItem.pokemon_id).single();

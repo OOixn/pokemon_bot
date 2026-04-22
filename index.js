@@ -433,8 +433,7 @@ setInterval(async () => {
     const REWARD_INTERVAL = 10 * 60 * 1000;
 
     for (const [discordId, session] of voiceSessions.entries()) {
-        const guild = client.guilds.cache.get(GUILD_ID);
-        if (!guild) continue;
+const guild = GUILD_ID ? client.guilds.cache.get(GUILD_ID) : client.guilds.cache.first();        if (!guild) continue;
         const member = await guild.members.fetch(discordId).catch(() => null);
         if (!member) continue;
 

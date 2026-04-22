@@ -151,12 +151,20 @@ client.once('ready', async () => {
     supabase.channel('mvp-insert-listener')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mvp_transactions' },
             async (payload) => {
+                console.log('🔔 [디버그] DB 결제 내역(INSERT) 감지 성공:', payload.new); // 🌟 감지 성공 로그
+                
                 try {
                     const tx = payload.new;
                     const { data: player } = await supabase.from('players').select('discord_id, mvp_expires_at').eq('id', tx.user_id).single();
-                    if (!player || !player.discord_id) return;
+                    
+                    if (!player || !player.discord_id) {
+                        console.log(`🚨 [디버그] 해당 유저(${tx.user_id})의 디스코드 ID가 DB에 없습니다.`);
+                        return;
+                    }
 
+                    // 디스코드에서 유저 정보 가져오기
                     const user = await client.users.fetch(player.discord_id).catch(() => null);
+                    
                     const expDateStr = new Date(player.mvp_expires_at).toLocaleString('ko-KR', { 
                         year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' 
                     });
@@ -166,24 +174,43 @@ client.once('ready', async () => {
                         .setTitle(`👑 MVP ${tx.package_days}일권 혜택 적용 완료!`)
                         .setDescription(`MVP 혜택이 성공적으로 적용되었습니다!\n\n🎁 **지급된 보너스:** +${tx.bonus_points.toLocaleString()} P\n⏳ **혜택 만료 일시:** ${expDateStr}\n\n후원해 주셔서 감사합니다!`);
 
+                    const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
+
+                    // 🌟 1. 유저를 찾은 경우 (DM 시도)
                     if (user) {
                         try {
                             await user.send({ embeds: [embed] });
+                            console.log(`✅ [디버그] ${player.discord_id} 님에게 DM 발송 성공!`);
                         } catch (err) {
-                            // 🌟 DM 차단 시 명령어 채널로 발송
-                            console.error('🚨 DM 발송 실패 에러 로그:', err);
-                            const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
+                            console.error(`🚨 [디버그] DM 발송 실패 (차단 등 사유):`, err.message);
                             if (noticeChannel) {
                                 await noticeChannel.send({ 
                                     content: `📢 <@${player.discord_id}>님, DM이 차단되어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
                                     embeds: [embed] 
                                 });
+                                console.log(`✅ [디버그] 대체 채널 우회 발송 완료`);
                             }
                         }
+                    } 
+                    // 🌟 2. 유저를 아예 못 찾은 경우 (무조건 대체 채널로 즉시 우회)
+                    else {
+                        console.error(`🚨 [디버그] 봇이 디스코드 서버에서 유저(${player.discord_id})를 찾을 수 없습니다.`);
+                        if (noticeChannel) {
+                            await noticeChannel.send({ 
+                                content: `📢 <@${player.discord_id}>님, 봇이 디스코드 프로필을 찾을 수 없어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
+                                embeds: [embed] 
+                            });
+                            console.log(`✅ [디버그] 대체 채널 우회 발송 완료 (유저 미발견 사유)`);
+                        }
                     }
-                } catch (error) { console.error('🚨 MVP 지급 알림 에러:', error); }
+                } catch (error) { 
+                    console.error('🚨 MVP 지급 알림 전체 로직 에러:', error); 
+                }
             }
-        ).subscribe();
+        ).subscribe((status) => {
+            // 🌟 봇이 켜질 때 DB 감지 기능이 정상 연결되었는지 확인하는 로그
+            console.log(`📡 [디버그] MVP 결제 감지(Realtime) 연결 상태: ${status}`);
+        });
 
     // ⏰ [자동 알림] 1분마다 경매 마감 체크
     const announcedAuctions = new Set();

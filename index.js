@@ -38,6 +38,10 @@ for (const file of commandFiles) {
 
 const voiceSessions = new Map();
 
+// 💡 채널 ID 설정 (환경변수 또는 상수로 관리)
+const AUCTION_CHANNEL_ID = '1494514674547298448'; 
+const COMMAND_NOTICE_CHANNEL_ID = '1494509385391673436'; // 🌟 명령어 알림 채널 (DM 차단 시 활용)
+
 // 💡 URL 슬래시 겹침 방지 헬퍼 함수
 const getSafeBaseApiUrl = () => {
     const rawUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
@@ -68,7 +72,6 @@ client.once('ready', async () => {
     console.log(`🔄 [재부팅 동기화] 기존 음성 접속자 ${activeUserCount}명의 파밍 타이머를 가동합니다!`);
 
     const GUILD_ID = process.env.DISCORD_GUILD_ID;
-    const AUCTION_CHANNEL_ID = '1494514674547298448'; 
 
     // 📡 [리스너 1] 웹 장착 감지 및 디스코드 역할 지급
     if (GUILD_ID) {
@@ -105,7 +108,7 @@ client.once('ready', async () => {
             ).subscribe();
     }
 
-    // 📡 [새로운 리스너 2] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
+    // 📡 [리스너 2] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
     supabase.channel('auction-insert-listener')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'auctions' },
             async (payload) => {
@@ -141,6 +144,43 @@ client.once('ready', async () => {
 
                     await channel.send({ content: `📢 **새로운 경매 매물 등록**`, embeds: [embed] });
                 } catch (error) { console.error('🚨 경매 등록 알림 에러:', error); }
+            }
+        ).subscribe();
+
+    // 📡 [MVP] 관리자 웹 MVP 승인 감지 및 DM 발송
+    supabase.channel('mvp-insert-listener')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mvp_transactions' },
+            async (payload) => {
+                try {
+                    const tx = payload.new;
+                    const { data: player } = await supabase.from('players').select('discord_id, mvp_expires_at').eq('id', tx.user_id).single();
+                    if (!player || !player.discord_id) return;
+
+                    const user = await client.users.fetch(player.discord_id).catch(() => null);
+                    const expDateStr = new Date(player.mvp_expires_at).toLocaleString('ko-KR', { 
+                        year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+                    });
+
+                    const embed = new EmbedBuilder()
+                        .setColor(0xFFD700)
+                        .setTitle(`👑 MVP ${tx.package_days}일권 혜택 적용 완료!`)
+                        .setDescription(`MVP 혜택이 성공적으로 적용되었습니다!\n\n🎁 **지급된 보너스:** +${tx.bonus_points.toLocaleString()} P\n⏳ **혜택 만료 일시:** ${expDateStr}\n\n후원해 주셔서 감사합니다!`);
+
+                    if (user) {
+                        try {
+                            await user.send({ embeds: [embed] });
+                        } catch (err) {
+                            // 🌟 DM 차단 시 명령어 채널로 발송
+                            const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
+                            if (noticeChannel) {
+                                await noticeChannel.send({ 
+                                    content: `📢 <@${player.discord_id}>님, DM이 차단되어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
+                                    embeds: [embed] 
+                                });
+                            }
+                        }
+                    }
+                } catch (error) { console.error('🚨 MVP 지급 알림 에러:', error); }
             }
         ).subscribe();
 
@@ -188,6 +228,85 @@ client.once('ready', async () => {
             }
         } catch (error) { console.error('경매 체크 에러:', error); }
     }, 60 * 1000);
+
+    // ⏰ [MVP] 매 1시간마다 MVP 및 Tier 2 만료자 체크 스케줄러
+    setInterval(async () => {
+        try {
+            const now = new Date();
+            const { data: mvpPlayers } = await supabase.from('players').select('id, discord_id, mvp_expires_at, premium_tier_expires_at').eq('is_mvp', true);
+            if (!mvpPlayers) return;
+
+            for (const player of mvpPlayers) {
+                if (!player.discord_id) continue;
+                const user = await client.users.fetch(player.discord_id).catch(() => null);
+
+                // --- [1] 최고 티어 (Tier 2) 만료 체크 ---
+                if (player.premium_tier_expires_at) {
+                    const premExp = new Date(player.premium_tier_expires_at);
+                    const premDiffMs = premExp.getTime() - now.getTime();
+                    const premDiffHours = premDiffMs / (1000 * 60 * 60);
+
+                    // A. Tier 2 만료 24시간 전 알림
+                    if (premDiffHours <= 24 && premDiffHours > 23) {
+                        if (user) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0xFFA000)
+                                .setTitle('💎 최고 티어 혜택 만료 24시간 전')
+                                .setDescription('소환사님의 최고 티어(Tier 2) 혜택이 **약 24시간 후 만료**됩니다.\n이후에는 일반 MVP 혜택(Tier 1)으로 전환되어 포인트 지급량이 소폭 감소합니다.');
+                            user.send({ embeds: [embed] }).catch(()=>{});
+                        }
+                    }
+                    // B. Tier 2 단독 만료 (Tier 1으로 전환)
+                    else if (premDiffMs <= 0 && premDiffMs > -3600000) { // 최근 1시간 이내 만료된 경우
+                        // DB 상의 premium_tier_expires_at을 null로 청소하여 중복 알림 방지
+                        await supabase.from('players').update({ premium_tier_expires_at: null }).eq('id', player.id);
+                        if (user) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0x03A9F4)
+                                .setTitle('💎 최고 티어 혜택 만료 안내')
+                                .setDescription('최고 티어(Tier 2) 기간이 종료되었습니다.\n이제 소환사님은 **일반 MVP 혜택(Tier 1)**으로 전환됩니다.\n\n(음성방 보상: 8P ➔ 7P / 내전 보상: 30P ➔ 20P)');
+                            user.send({ embeds: [embed] }).catch(()=>{});
+                        }
+                    }
+                }
+
+                // --- [2] 전체 MVP (Tier 1) 만료 체크 ---
+                if (player.mvp_expires_at) {
+                    const mvpExp = new Date(player.mvp_expires_at);
+                    const mvpDiffMs = mvpExp.getTime() - now.getTime();
+                    const mvpDiffHours = mvpDiffMs / (1000 * 60 * 60);
+
+                    // A. 전체 만료 24시간 전 알림
+                    if (mvpDiffHours <= 24 && mvpDiffHours > 23) {
+                        if (user) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0xFF5722)
+                                .setTitle('⚠️ MVP 혜택 만료 24시간 전')
+                                .setDescription('소환사님의 MVP 혜택이 **약 24시간 후 만료**됩니다.\n혜택 유지를 원하시면 연장을 고려해 보세요!');
+                            user.send({ embeds: [embed] }).catch(()=>{});
+                        }
+                    }
+                    // B. 전체 만료 (일반 등급으로 강등)
+                    else if (mvpDiffMs <= 0) {
+                        // 🌟 정합성 강화: is_mvp 해제와 동시에 만료일들 초기화
+                        await supabase.from('players').update({ 
+                            is_mvp: false, 
+                            mvp_expires_at: null, 
+                            premium_tier_expires_at: null 
+                        }).eq('id', player.id);
+
+                        if (user) {
+                            const embed = new EmbedBuilder()
+                                .setColor(0x808080)
+                                .setTitle('💔 MVP 혜택 만료 안내')
+                                .setDescription('아쉽게도 MVP 혜택 기간이 모두 종료되어 일반 등급으로 전환되었습니다.\n그동안의 후원에 다시 한번 감사드립니다!');
+                            user.send({ embeds: [embed] }).catch(()=>{});
+                        }
+                    }
+                }
+            }
+        } catch (error) { console.error('MVP 스케줄러 에러:', error); }
+    }, 60 * 60 * 1000);
 });
 
 // 🎙️ [음성 파밍]
@@ -230,12 +349,30 @@ setInterval(async () => {
 
         if (currentTotal >= REWARD_INTERVAL) {
             try {
-                const { data: player } = await supabase.from('players').select('id, points').eq('discord_id', discordId).single();
+                const { data: player } = await supabase.from('players')
+                    .select('id, points, premium_tier_expires_at, mvp_expires_at')
+                    .eq('discord_id', discordId).single();
+                
                 if (player) {
-                    const amount = 5;
+                    let amount = 5; 
+                    const nowTime = new Date();
+                    const premiumExp = player.premium_tier_expires_at ? new Date(player.premium_tier_expires_at) : null;
+                    const mvpExp = player.mvp_expires_at ? new Date(player.mvp_expires_at) : null;
+
+                    if (premiumExp && premiumExp > nowTime) {
+                        amount = 8;
+                    } 
+                    else if (mvpExp && mvpExp > nowTime) {
+                        amount = 7;
+                    }
+
                     const newPoints = (player.points || 0) + amount;
                     await supabase.from('players').update({ points: newPoints }).eq('id', player.id);
-                    await supabase.from('point_logs').insert({ user_id: player.id, amount: amount, reason: '음성 채널 유지 보상 (10분)' });
+                    await supabase.from('point_logs').insert({ 
+                        user_id: player.id, 
+                        amount: amount, 
+                        reason: `음성 채널 유지 보상 (10분, +${amount}P)` 
+                    });
                 }
             } catch (e) { console.error('보상 지급 중 에러:', e); }
 
@@ -248,6 +385,7 @@ setInterval(async () => {
         }
     }
 }, 60 * 1000);
+
 
 // 🤖 상호작용 (명령어, 버튼, 모달) 처리
 client.on('interactionCreate', async interaction => {

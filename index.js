@@ -49,11 +49,12 @@ for (const file of commandFiles) {
 }
 
 // ==========================================
-// 4. 전역 상수
+// 4. 채널 ID 설정
 // ==========================================
-const voiceSessions = new Map();
-const AUCTION_CHANNEL_ID = '1494514674547298448';
-const COMMAND_NOTICE_CHANNEL_ID = '1494509385391673436';
+const AUCTION_CHANNEL_ID     = '경매채널ID';       // 경매 등록/낙찰 알림
+const MVP_NOTICE_CHANNEL_ID  = '공지채널ID';        // MVP 결제 완료 알림
+const MVP_EXPIRE_CHANNEL_ID  = '공지채널ID';        // MVP 만료 알림 (별도 채널 원하면 변경)
+
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
 const getSafeBaseApiUrl = () => {
@@ -62,9 +63,10 @@ const getSafeBaseApiUrl = () => {
     return `${cleanUrl}/api/pokemon`;
 };
 
+const voiceSessions = new Map();
+
 // ==========================================
 // 5. 봇 준비 완료
-// [수정 8] clientReady → Events.ClientReady (discord.js v14 공식 권장)
 // ==========================================
 client.once(Events.ClientReady, async () => {
     console.log(`✅ 로그인 성공! 봇 이름: ${client.user.tag}`);
@@ -98,8 +100,7 @@ client.once(Events.ClientReady, async () => {
     // ==========================================
     const dbChannel = supabase.channel('pokemon-system-channel-v3');
 
-    // [장착 감지] 에픽 이상 포켓몬 장착 시 디스코드 역할 자동 지급
-    // [수정 7] GUILD_ID 없으면 리스너 자체를 등록하지 않음 (의도 명확화)
+    // [장착 감지]
     if (GUILD_ID) {
         dbChannel.on(
             'postgres_changes',
@@ -137,7 +138,7 @@ client.once(Events.ClientReady, async () => {
         );
     }
 
-    // [경매 등록 감지] 새 매물 등록 시 경매 채널 알림
+    // [경매 등록 감지]
     dbChannel.on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'auctions' },
@@ -195,9 +196,7 @@ client.once(Events.ClientReady, async () => {
     });
 
     // ==========================================
-    // 🌟 MVP 결제 감지 — 폴링 방식
-    // [수정 4] 봇 재시작 시 DB에서 마지막 처리 시간 복구
-    //          마지막 created_at + 1ms로 갱신 (중복/누락 동시 방지)
+    // 🌟 MVP 결제 감지 — 폴링 방식 (DM 제거, 채널 알림으로 통일)
     // ==========================================
     let lastMvpCheckTime = new Date().toISOString();
     try {
@@ -209,7 +208,6 @@ client.once(Events.ClientReady, async () => {
             .single();
 
         if (lastTx) {
-            // 마지막 처리 건의 created_at + 1ms → 중복 발송 + 누락 동시 방지
             const lastTime = new Date(lastTx.created_at);
             lastTime.setMilliseconds(lastTime.getMilliseconds() + 1);
             lastMvpCheckTime = lastTime.toISOString();
@@ -231,6 +229,8 @@ client.once(Events.ClientReady, async () => {
 
             if (error || !newTxs || newTxs.length === 0) return;
 
+            const noticeChannel = client.channels.cache.get(MVP_NOTICE_CHANNEL_ID);
+
             for (const tx of newTxs) {
                 console.log(`🔔 [디버그] MVP 결제 감지 (Polling): ${tx.id}`);
 
@@ -245,7 +245,6 @@ client.once(Events.ClientReady, async () => {
                     continue;
                 }
 
-                const user = await client.users.fetch(player.discord_id).catch(() => null);
                 const expDateStr = new Date(player.mvp_expires_at).toLocaleString('ko-KR', {
                     year: 'numeric', month: 'long', day: 'numeric',
                     hour: '2-digit', minute: '2-digit'
@@ -261,33 +260,18 @@ client.once(Events.ClientReady, async () => {
                         `후원해 주셔서 감사합니다!`
                     );
 
-                const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
-
-                if (user) {
-                    try {
-                        await user.send({ embeds: [embed] });
-                        console.log(`✅ [디버그] DM 발송 성공: ${player.discord_id}`);
-                    } catch (err) {
-                        console.error(`🚨 [디버그] DM 차단 — 공지 채널 대체 발송`);
-                        if (noticeChannel) {
-                            await noticeChannel.send({
-                                content: `📢 <@${player.discord_id}>님, DM이 차단되어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`,
-                                embeds: [embed]
-                            });
-                        }
-                    }
+                if (noticeChannel) {
+                    await noticeChannel.send({
+                        content: `📢 <@${player.discord_id}>님, MVP 혜택이 정상 적용되었습니다!`,
+                        embeds: [embed]
+                    });
+                    console.log(`✅ [디버그] 채널 알림 발송 완료: ${player.discord_id}`);
                 } else {
-                    console.error(`🚨 [디버그] 유저 미발견: ${player.discord_id}`);
-                    if (noticeChannel) {
-                        await noticeChannel.send({
-                            content: `📢 <@${player.discord_id}>님, 디스코드 프로필을 찾을 수 없어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`,
-                            embeds: [embed]
-                        });
-                    }
+                    console.error(`🚨 [디버그] MVP 공지 채널을 찾을 수 없습니다. ID: ${MVP_NOTICE_CHANNEL_ID}`);
                 }
             }
 
-            // [수정 4] 루프 완료 후 마지막 건 created_at + 1ms 갱신
+            // 루프 완료 후 마지막 건 +1ms 갱신
             const lastCreatedAt = new Date(newTxs[newTxs.length - 1].created_at);
             lastCreatedAt.setMilliseconds(lastCreatedAt.getMilliseconds() + 1);
             lastMvpCheckTime = lastCreatedAt.toISOString();
@@ -299,8 +283,6 @@ client.once(Events.ClientReady, async () => {
 
     // ==========================================
     // ⏰ 경매 마감 체크 (60초 주기)
-    // [수정 3] 봇 재시작 시 최근 30분 마감 경매 선로드 (중복 알림 방지)
-    // [수정 5] a.pokemon null 크래시 방지 (옵셔널 체이닝)
     // ==========================================
     const announcedAuctions = new Set();
 
@@ -348,7 +330,6 @@ client.once(Events.ClientReady, async () => {
                         .single();
 
                     const winnerMention = winner ? `<@${winner.discord_id}>` : '익명의 소환사';
-                    // [수정 5] 옵셔널 체이닝으로 null 크래시 방지
                     const itemName = a.sell_type === 'item'
                         ? a.item_name
                         : (a.pokemon?.name_ko ?? '알 수 없는 포켓몬');
@@ -377,28 +358,26 @@ client.once(Events.ClientReady, async () => {
     }, 60 * 1000);
 
     // ==========================================
-    // ⏰ MVP 만료 스케줄러 (1시간 주기)
-    // [수정 6] Tier 2 만료 체크를 is_mvp와 분리
-    //          premium_tier_expires_at이 있는 유저를 별도 조회
+    // ⏰ MVP 만료 스케줄러 (1시간 주기, DM 제거, 채널 알림으로 통일)
     // ==========================================
     setInterval(async () => {
         try {
             const now = new Date();
+            const expireChannel = client.channels.cache.get(MVP_EXPIRE_CHANNEL_ID);
 
-            // MVP 전체 유저 (is_mvp: true)
+            // is_mvp: true 유저
             const { data: mvpPlayers } = await supabase
                 .from('players')
                 .select('id, discord_id, mvp_expires_at, premium_tier_expires_at')
                 .eq('is_mvp', true);
 
-            // [수정 6] Tier 2 만료 알림 — is_mvp와 무관하게 별도 조회
+            // is_mvp: false인데 Tier 2 잔존 유저 (별도 체크)
             const { data: tier2Players } = await supabase
                 .from('players')
                 .select('id, discord_id, premium_tier_expires_at')
                 .eq('is_mvp', false)
                 .not('premium_tier_expires_at', 'is', null);
 
-            // is_mvp: true 유저 + is_mvp: false인데 Tier 2 잔존 유저 통합
             const allPlayers = [
                 ...(mvpPlayers || []),
                 ...(tier2Players || [])
@@ -406,7 +385,6 @@ client.once(Events.ClientReady, async () => {
 
             for (const player of allPlayers) {
                 if (!player.discord_id) continue;
-                const user = await client.users.fetch(player.discord_id).catch(() => null);
 
                 // --- Tier 2 만료 체크 ---
                 if (player.premium_tier_expires_at) {
@@ -416,39 +394,45 @@ client.once(Events.ClientReady, async () => {
 
                     // A. Tier 2 만료 24시간 전 알림
                     if (premDiffHours <= 24 && premDiffHours > 23) {
-                        if (user) {
+                        if (expireChannel) {
                             const embed = new EmbedBuilder()
                                 .setColor(0xFFA000)
                                 .setTitle('💎 최고 티어 혜택 만료 24시간 전')
                                 .setDescription(
-                                    '소환사님의 최고 티어(Tier 2) 혜택이 **약 24시간 후 만료**됩니다.\n' +
+                                    '최고 티어(Tier 2) 혜택이 **약 24시간 후 만료**됩니다.\n' +
                                     '이후에는 일반 MVP 혜택(Tier 1)으로 전환되어 포인트 지급량이 소폭 감소합니다.'
                                 );
-                            user.send({ embeds: [embed] }).catch(() => {});
+                            await expireChannel.send({
+                                content: `⚠️ <@${player.discord_id}>님`,
+                                embeds: [embed]
+                            });
                         }
                     }
-                    // B. Tier 2 단독 만료 처리 (1시간 제한 없음)
+                    // B. Tier 2 단독 만료
                     else if (premDiffMs <= 0) {
                         await supabase
                             .from('players')
                             .update({ premium_tier_expires_at: null })
                             .eq('id', player.id);
 
-                        if (user) {
+                        if (expireChannel) {
                             const embed = new EmbedBuilder()
                                 .setColor(0x03A9F4)
                                 .setTitle('💎 최고 티어 혜택 만료 안내')
                                 .setDescription(
                                     '최고 티어(Tier 2) 기간이 종료되었습니다.\n' +
-                                    '이제 소환사님은 **일반 MVP 혜택(Tier 1)​**으로 전환됩니다.\n\n' +
+                                    '이제 **일반 MVP 혜택(Tier 1)​**으로 전환됩니다.\n\n' +
                                     '(음성방: 8P ➔ 7P / 내전 승리: 30P ➔ 20P, 패배: 25P ➔ 15P)'
                                 );
-                            user.send({ embeds: [embed] }).catch(() => {});
+                            await expireChannel.send({
+                                content: `📢 <@${player.discord_id}>님`,
+                                embeds: [embed]
+                            });
                         }
                     }
                 }
 
-                // --- 전체 MVP 만료 체크 (is_mvp: true 유저만) ---
+                // --- 전체 MVP 만료 체크 ---
                 if (player.mvp_expires_at) {
                     const mvpExp = new Date(player.mvp_expires_at);
                     const mvpDiffMs = mvpExp.getTime() - now.getTime();
@@ -456,18 +440,21 @@ client.once(Events.ClientReady, async () => {
 
                     // A. MVP 만료 24시간 전 알림
                     if (mvpDiffHours <= 24 && mvpDiffHours > 23) {
-                        if (user) {
+                        if (expireChannel) {
                             const embed = new EmbedBuilder()
                                 .setColor(0xFF5722)
                                 .setTitle('⚠️ MVP 혜택 만료 24시간 전')
                                 .setDescription(
-                                    '소환사님의 MVP 혜택이 **약 24시간 후 만료**됩니다.\n' +
+                                    'MVP 혜택이 **약 24시간 후 만료**됩니다.\n' +
                                     '혜택 유지를 원하시면 연장을 고려해 보세요!'
                                 );
-                            user.send({ embeds: [embed] }).catch(() => {});
+                            await expireChannel.send({
+                                content: `⚠️ <@${player.discord_id}>님`,
+                                embeds: [embed]
+                            });
                         }
                     }
-                    // B. MVP 전체 만료 — 일반 등급 전환
+                    // B. MVP 전체 만료
                     else if (mvpDiffMs <= 0) {
                         await supabase
                             .from('players')
@@ -478,15 +465,18 @@ client.once(Events.ClientReady, async () => {
                             })
                             .eq('id', player.id);
 
-                        if (user) {
+                        if (expireChannel) {
                             const embed = new EmbedBuilder()
                                 .setColor(0x808080)
                                 .setTitle('💔 MVP 혜택 만료 안내')
                                 .setDescription(
-                                    '아쉽게도 MVP 혜택 기간이 모두 종료되어 일반 등급으로 전환되었습니다.\n' +
+                                    'MVP 혜택 기간이 모두 종료되어 일반 등급으로 전환되었습니다.\n' +
                                     '그동안의 후원에 다시 한번 감사드립니다!'
                                 );
-                            user.send({ embeds: [embed] }).catch(() => {});
+                            await expireChannel.send({
+                                content: `📢 <@${player.discord_id}>님`,
+                                embeds: [embed]
+                            });
                         }
                     }
                 }
@@ -506,14 +496,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const now = Date.now();
 
     if (!oldState.channelId && newState.channelId) {
-        // 입장
         if (!voiceSessions.has(discordId)) {
             voiceSessions.set(discordId, { joinedAt: now, accumulated: 0 });
         } else {
             voiceSessions.get(discordId).joinedAt = now;
         }
     } else if (oldState.channelId && !newState.channelId) {
-        // 퇴장
         const session = voiceSessions.get(discordId);
         if (session && session.joinedAt) {
             session.accumulated += (now - session.joinedAt);
@@ -523,15 +511,11 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // 음성 파밍 포인트 지급 (1분 주기 체크, 10분 누적 시 지급)
-// [수정 1] while 루프로 10분 2배 이상 누적 시 잔량 소멸 버그 수정
-// [수정 2] 보상 지급 실패 시 타이머 차감 안 함
-// [수정 3] GUILD_ID로 정확한 서버 지정 (first() 멀티서버 위험 제거)
 setInterval(async () => {
     const now = Date.now();
     const REWARD_INTERVAL = 10 * 60 * 1000;
 
     for (const [discordId, session] of voiceSessions.entries()) {
-        // [수정 3] client.guilds.cache.first() → GUILD_ID로 정확히 지정
         const guild = client.guilds.cache.get(GUILD_ID);
         if (!guild) continue;
         const member = await guild.members.fetch(discordId).catch(() => null);
@@ -542,7 +526,6 @@ setInterval(async () => {
             currentTotal += (now - session.joinedAt);
         }
 
-        // [수정 1] while 루프 — 10분 2배 이상 누적 시 모두 처리
         while (currentTotal >= REWARD_INTERVAL) {
             try {
                 const { data: player } = await supabase
@@ -558,9 +541,9 @@ setInterval(async () => {
                     const mvpExp = player.mvp_expires_at ? new Date(player.mvp_expires_at) : null;
 
                     if (premiumExp && premiumExp > nowTime) {
-                        amount = 8; // Tier 2
+                        amount = 8;
                     } else if (mvpExp && mvpExp > nowTime) {
-                        amount = 7; // 일반 MVP
+                        amount = 7;
                     }
 
                     const newPoints = (player.points || 0) + amount;
@@ -571,20 +554,16 @@ setInterval(async () => {
                         reason: `음성 채널 유지 보상 (10분, +${amount}P)`
                     });
 
-                    // [수정 2] 지급 성공 시에만 타이머 차감
                     currentTotal -= REWARD_INTERVAL;
                 } else {
-                    // 유저 정보 없으면 루프 탈출 (무한 루프 방지)
                     break;
                 }
             } catch (e) {
                 console.error('보상 지급 에러:', e);
-                // [수정 2] 지급 실패 시 타이머 차감 안 하고 루프 탈출
                 break;
             }
         }
 
-        // 최종 누적량 저장
         session.accumulated = currentTotal;
         if (member.voice.channelId) {
             session.joinedAt = now;
@@ -598,19 +577,15 @@ setInterval(async () => {
 client.on('interactionCreate', async interaction => {
     const baseApiUrl = getSafeBaseApiUrl();
 
-    // 슬래시 명령어
     if (interaction.isChatInputCommand()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.execute(interaction, supabase);
     }
-    // 자동완성
     else if (interaction.isAutocomplete()) {
         const command = client.commands.get(interaction.commandName);
         if (command) await command.autocomplete(interaction, supabase);
     }
-    // 버튼
     else if (interaction.isButton()) {
-        // 경매 취소
         if (interaction.customId.startsWith('cancel_')) {
             const auctionId = interaction.customId.replace('cancel_', '');
             try {
@@ -631,7 +606,6 @@ client.on('interactionCreate', async interaction => {
                 }
             } catch (e) { console.error(e); }
         }
-        // 경매 입찰 모달 열기
         else if (interaction.customId.startsWith('bid_')) {
             const withoutPrefix = interaction.customId.replace('bid_', '');
             const lastUnderscore = withoutPrefix.lastIndexOf('_');
@@ -650,7 +624,6 @@ client.on('interactionCreate', async interaction => {
             await interaction.showModal(modal);
         }
 
-        // 포켓몬 관련 버튼 (산책 / 진화 / 보관함)
         const commandMap = { 'walk_pet': '산책', 'evolve_pet': '진화', 'open_inventory': '보관함' };
         const targetCmd = commandMap[interaction.customId];
         if (targetCmd) {
@@ -661,9 +634,7 @@ client.on('interactionCreate', async interaction => {
             if (cmd) await cmd.execute(interaction, supabase);
         }
     }
-    // 모달 제출
     else if (interaction.isModalSubmit()) {
-        // 경매 등록 모달
         if (interaction.customId.startsWith('modal_register_')) {
             await interaction.deferReply({ ephemeral: true });
             const selectedValue = interaction.customId.replace('modal_register_', '');
@@ -707,7 +678,6 @@ client.on('interactionCreate', async interaction => {
                 interaction.editReply('❌ 시스템 내부 오류가 발생했습니다.');
             }
         }
-        // 입찰 모달
         else if (interaction.customId.startsWith('modal_bid_')) {
             await interaction.deferReply({ ephemeral: true });
             const auctionId = interaction.customId.replace('modal_bid_', '');

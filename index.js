@@ -7,10 +7,16 @@ const {
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 
-// 1. Supabase 연결
+// 🌟 [수정 1] Supabase 연결 시 실시간 웹소켓 안정성 대폭 강화
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: { persistSession: false },
+    realtime: {
+        params: { eventsPerSecond: 10 },
+        timeout: 30000 // 연결 대기 시간을 기본 10초 -> 30초로 넉넉하게 연장
+    }
+});
 
 // 2. 디스코드 클라이언트 생성
 const client = new Client({
@@ -38,11 +44,10 @@ for (const file of commandFiles) {
 
 const voiceSessions = new Map();
 
-// 💡 채널 ID 설정 (환경변수 또는 상수로 관리)
+// 💡 채널 ID 설정
 const AUCTION_CHANNEL_ID = '1494514674547298448'; 
-const COMMAND_NOTICE_CHANNEL_ID = '1494509385391673436'; // 🌟 명령어 알림 채널 (DM 차단 시 활용)
+const COMMAND_NOTICE_CHANNEL_ID = '1494509385391673436';
 
-// 💡 URL 슬래시 겹침 방지 헬퍼 함수
 const getSafeBaseApiUrl = () => {
     const rawUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
     const cleanUrl = rawUrl.endsWith('/') ? rawUrl.slice(0, -1) : rawUrl;
@@ -58,7 +63,6 @@ client.once('ready', async () => {
         console.log('✅ 슬래시 명령어 등록 완료!');
     } catch (error) { console.error('명령어 등록 에러:', error); }
 
-    // 🔄 [재부팅 동기화]
     let activeUserCount = 0;
     const nowSync = Date.now();
     client.guilds.cache.forEach(guild => {
@@ -74,12 +78,10 @@ client.once('ready', async () => {
     const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
     // ==========================================
-    // 📡 [Supabase 통합 Realtime 리스너]
-    // 웹소켓 연결 과부하(TIMED_OUT) 방지를 위해 단일 채널로 3개의 테이블을 동시 감지합니다.
+    // 🌟 [수정 2] 채널 이름을 "-v2"로 변경하여 Supabase의 서버 캐시(과부하 락)를 완벽하게 회피합니다.
     // ==========================================
-    const dbChannel = supabase.channel('pokemon-system-channel');
+    const dbChannel = supabase.channel('pokemon-system-channel-v2');
 
-    // 1. [장착 감지] 웹 장착 감지 및 디스코드 역할 지급
     if (GUILD_ID) {
         dbChannel.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'user_inventory', filter: 'status=eq.equipped' },
             async (payload) => {
@@ -113,7 +115,6 @@ client.once('ready', async () => {
         );
     }
 
-    // 2. [경매 감지] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
     dbChannel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'auctions' },
         async (payload) => {
             try {
@@ -151,7 +152,6 @@ client.once('ready', async () => {
         }
     );
 
-    // 3. [MVP 감지] 관리자 웹 MVP 승인 감지 및 DM 발송
     dbChannel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mvp_transactions' },
         async (payload) => {
             console.log('🔔 [디버그] DB 결제 내역(INSERT) 감지 성공:', payload.new);
@@ -207,7 +207,6 @@ client.once('ready', async () => {
         }
     );
 
-    // 🌟 최종 1회 구독 및 상태 모니터링
     dbChannel.subscribe((status) => {
         console.log(`📡 [디버그] Supabase Realtime 통합 연결 상태: ${status}`);
         if (status === 'TIMED_OUT') {
@@ -215,7 +214,6 @@ client.once('ready', async () => {
         }
     });
 
-    // ⏰ [자동 알림] 1분마다 경매 마감 체크
     const announcedAuctions = new Set();
     setInterval(async () => {
         try {
@@ -260,7 +258,6 @@ client.once('ready', async () => {
         } catch (error) { console.error('경매 체크 에러:', error); }
     }, 60 * 1000);
 
-    // ⏰ [MVP] 매 1시간마다 MVP 및 Tier 2 만료자 체크 스케줄러
     setInterval(async () => {
         try {
             const now = new Date();
@@ -271,13 +268,11 @@ client.once('ready', async () => {
                 if (!player.discord_id) continue;
                 const user = await client.users.fetch(player.discord_id).catch(() => null);
 
-                // --- [1] 최고 티어 (Tier 2) 만료 체크 ---
                 if (player.premium_tier_expires_at) {
                     const premExp = new Date(player.premium_tier_expires_at);
                     const premDiffMs = premExp.getTime() - now.getTime();
                     const premDiffHours = premDiffMs / (1000 * 60 * 60);
 
-                    // A. Tier 2 만료 24시간 전 알림
                     if (premDiffHours <= 24 && premDiffHours > 23) {
                         if (user) {
                             const embed = new EmbedBuilder()
@@ -287,9 +282,7 @@ client.once('ready', async () => {
                             user.send({ embeds: [embed] }).catch(()=>{});
                         }
                     }
-                    // B. Tier 2 단독 만료 (Tier 1으로 전환)
-                    else if (premDiffMs <= 0 && premDiffMs > -3600000) { // 최근 1시간 이내 만료된 경우
-                        // DB 상의 premium_tier_expires_at을 null로 청소하여 중복 알림 방지
+                    else if (premDiffMs <= 0 && premDiffMs > -3600000) { 
                         await supabase.from('players').update({ premium_tier_expires_at: null }).eq('id', player.id);
                         if (user) {
                             const embed = new EmbedBuilder()
@@ -301,13 +294,11 @@ client.once('ready', async () => {
                     }
                 }
 
-                // --- [2] 전체 MVP (Tier 1) 만료 체크 ---
                 if (player.mvp_expires_at) {
                     const mvpExp = new Date(player.mvp_expires_at);
                     const mvpDiffMs = mvpExp.getTime() - now.getTime();
                     const mvpDiffHours = mvpDiffMs / (1000 * 60 * 60);
 
-                    // A. 전체 만료 24시간 전 알림
                     if (mvpDiffHours <= 24 && mvpDiffHours > 23) {
                         if (user) {
                             const embed = new EmbedBuilder()
@@ -317,9 +308,7 @@ client.once('ready', async () => {
                             user.send({ embeds: [embed] }).catch(()=>{});
                         }
                     }
-                    // B. 전체 만료 (일반 등급으로 강등)
                     else if (mvpDiffMs <= 0) {
-                        // 🌟 정합성 강화: is_mvp 해제와 동시에 만료일들 초기화
                         await supabase.from('players').update({ 
                             is_mvp: false, 
                             mvp_expires_at: null, 
@@ -437,8 +426,6 @@ client.on('interactionCreate', async interaction => {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
                     body: JSON.stringify({ auction_id: auctionId, user_id: interaction.user.id }) 
                 });
-                
-                // 🌟 무조건 JSON을 파싱해서 API의 메시지를 꺼냅니다!
                 const data = await res.json().catch(() => ({ success: false, message: '서버 응답 파싱 실패' }));
                 
                 if (data.success) {
@@ -469,11 +456,9 @@ client.on('interactionCreate', async interaction => {
         }
     } 
     else if (interaction.isModalSubmit()) {
-        // ========== [경매 등록 모달] ==========
         if (interaction.customId.startsWith('modal_register_')) {
             await interaction.deferReply({ ephemeral: true });
             const selectedValue = interaction.customId.replace('modal_register_', '');
-
             const firstUnderscore = selectedValue.indexOf('_');
             const type = selectedValue.slice(0, firstUnderscore);      
             const targetId = selectedValue.slice(firstUnderscore + 1); 
@@ -501,14 +486,11 @@ client.on('interactionCreate', async interaction => {
                         duration_hours: durationHours 
                     }) 
                 });
-                
-                // 🌟 핵심: 에러가 나더라도 무조건 JSON을 뜯어서 상세 사유를 꺼냅니다!
                 const data = await res.json().catch(() => ({ success: false, message: `통신 상태 오류 (${res.status})` }));
                 
                 if (data.success) {
                     await interaction.editReply('✅ 경매 등록이 완료되었습니다!');
                 } else {
-                    // API에서 보내준 친절한 메시지 (예: 이미 등록된 매물입니다)를 출력
                     await interaction.editReply(`❌ 등록 실패: ${data.message}`);
                 }
             } catch (e) { 
@@ -516,7 +498,6 @@ client.on('interactionCreate', async interaction => {
                 interaction.editReply('❌ 시스템 내부 오류가 발생했습니다.'); 
             }
         }
-        // ========== [입찰 모달] ==========
         else if (interaction.customId.startsWith('modal_bid_')) {
             await interaction.deferReply({ ephemeral: true });
             const auctionId = interaction.customId.replace('modal_bid_', '');
@@ -526,8 +507,6 @@ client.on('interactionCreate', async interaction => {
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, 
                     body: JSON.stringify({ auction_id: auctionId, bidder_id: interaction.user.id, bid_amount: bidAmount }) 
                 });
-                
-                // 🌟 입찰 시에도 API 메시지를 뜯어옵니다!
                 const data = await res.json().catch(() => ({ success: false, message: '서버 응답 파싱 실패' }));
                 
                 if (data.success) {

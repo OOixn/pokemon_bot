@@ -171,6 +171,7 @@ client.once('ready', async () => {
                             await user.send({ embeds: [embed] });
                         } catch (err) {
                             // 🌟 DM 차단 시 명령어 채널로 발송
+                            console.error('🚨 DM 발송 실패 에러 로그:', err);
                             const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
                             if (noticeChannel) {
                                 await noticeChannel.send({ 
@@ -385,7 +386,6 @@ setInterval(async () => {
         }
     }
 }, 60 * 1000);
-
 
 // 🤖 상호작용 (명령어, 버튼, 모달) 처리
 client.on('interactionCreate', async interaction => {

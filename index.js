@@ -73,144 +73,147 @@ client.once('ready', async () => {
 
     const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
-    // 📡 [리스너 1] 웹 장착 감지 및 디스코드 역할 지급
+    // ==========================================
+    // 📡 [Supabase 통합 Realtime 리스너]
+    // 웹소켓 연결 과부하(TIMED_OUT) 방지를 위해 단일 채널로 3개의 테이블을 동시 감지합니다.
+    // ==========================================
+    const dbChannel = supabase.channel('pokemon-system-channel');
+
+    // 1. [장착 감지] 웹 장착 감지 및 디스코드 역할 지급
     if (GUILD_ID) {
-        supabase.channel('equip-listener')
-            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'user_inventory', filter: 'status=eq.equipped' },
-                async (payload) => {
-                    try {
-                        const { user_id, pokemon_id } = payload.new;
-                        const { data: player } = await supabase.from('players').select('discord_id').eq('id', user_id).single();
-                        const { data: pokeDict } = await supabase.from('pokemon_dict').select('name_ko, rarity').eq('id', pokemon_id).single();
+        dbChannel.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'user_inventory', filter: 'status=eq.equipped' },
+            async (payload) => {
+                try {
+                    const { user_id, pokemon_id } = payload.new;
+                    const { data: player } = await supabase.from('players').select('discord_id').eq('id', user_id).single();
+                    const { data: pokeDict } = await supabase.from('pokemon_dict').select('name_ko, rarity').eq('id', pokemon_id).single();
 
-                        if (!player || !pokeDict) return;
-                        const guild = client.guilds.cache.get(GUILD_ID);
-                        if (!guild) return;
-                        const member = await guild.members.fetch(player.discord_id).catch(() => null);
-                        if (!member) return;
+                    if (!player || !pokeDict) return;
+                    const guild = client.guilds.cache.get(GUILD_ID);
+                    if (!guild) return;
+                    const member = await guild.members.fetch(player.discord_id).catch(() => null);
+                    if (!member) return;
 
-                        const pokemonName = pokeDict.name_ko;
-                        const rarity = pokeDict.rarity || '일반';
-                        const targetRarities = ['에픽', '전설', '환상', '히든'];
+                    const pokemonName = pokeDict.name_ko;
+                    const rarity = pokeDict.rarity || '일반';
+                    const targetRarities = ['에픽', '전설', '환상', '히든'];
 
-                        if (targetRarities.includes(rarity)) {
-                            const roleToAdd = guild.roles.cache.find(role => role.name === pokemonName);
-                            if (roleToAdd) await member.roles.add(roleToAdd).catch(console.error);
+                    if (targetRarities.includes(rarity)) {
+                        const roleToAdd = guild.roles.cache.find(role => role.name === pokemonName);
+                        if (roleToAdd) await member.roles.add(roleToAdd).catch(console.error);
 
-                            if (rarity === '에픽' || rarity === '전설') {
-                                const groupRoleName = `${rarity}포켓몬`;
-                                const groupRole = guild.roles.cache.find(role => role.name === groupRoleName);
-                                if (groupRole) await member.roles.add(groupRole).catch(console.error);
-                            }
+                        if (rarity === '에픽' || rarity === '전설') {
+                            const groupRoleName = `${rarity}포켓몬`;
+                            const groupRole = guild.roles.cache.find(role => role.name === groupRoleName);
+                            if (groupRole) await member.roles.add(groupRole).catch(console.error);
                         }
-                    } catch (error) { console.error('🚨 웹 장착 감지 에러:', error); }
-                }
-            ).subscribe();
+                    }
+                } catch (error) { console.error('🚨 웹 장착 감지 에러:', error); }
+            }
+        );
     }
 
-    // 📡 [리스너 2] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
-    supabase.channel('auction-insert-listener')
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'auctions' },
-            async (payload) => {
-                try {
-                    const auction = payload.new;
-                    const channel = client.channels.cache.get(AUCTION_CHANNEL_ID);
-                    if (!channel) return;
+    // 2. [경매 감지] 웹/봇 통합: 경매 매물 등록 실시간 감지 알림
+    dbChannel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'auctions' },
+        async (payload) => {
+            try {
+                const auction = payload.new;
+                const channel = client.channels.cache.get(AUCTION_CHANNEL_ID);
+                if (!channel) return;
 
-                    const { data: seller } = await supabase.from('players').select('discord_id').eq('id', auction.seller_id).single();
-                    if (!seller) return;
+                const { data: seller } = await supabase.from('players').select('discord_id').eq('id', auction.seller_id).single();
+                if (!seller) return;
 
-                    let itemName = auction.item_name;
-                    let rarity = '아이템';
-                    let thumb = null;
+                let itemName = auction.item_name;
+                let rarity = '아이템';
+                let thumb = null;
 
-                    if (auction.sell_type === 'pokemon') {
-                        const { data: inv } = await supabase.from('user_inventory').select('pokemon:pokemon_dict(name_ko, rarity, official_art_url, sprite_url)').eq('id', auction.inventory_item_id).single();
-                        if (inv && inv.pokemon) {
-                            const pokeData = Array.isArray(inv.pokemon) ? inv.pokemon[0] : inv.pokemon;
-                            itemName = pokeData.name_ko;
-                            rarity = pokeData.rarity || '일반';
-                            thumb = pokeData.official_art_url || pokeData.sprite_url;
-                        }
+                if (auction.sell_type === 'pokemon') {
+                    const { data: inv } = await supabase.from('user_inventory').select('pokemon:pokemon_dict(name_ko, rarity, official_art_url, sprite_url)').eq('id', auction.inventory_item_id).single();
+                    if (inv && inv.pokemon) {
+                        const pokeData = Array.isArray(inv.pokemon) ? inv.pokemon[0] : inv.pokemon;
+                        itemName = pokeData.name_ko;
+                        rarity = pokeData.rarity || '일반';
+                        thumb = pokeData.official_art_url || pokeData.sprite_url;
                     }
+                }
 
-                    const embed = new EmbedBuilder()
-                        .setColor(0x00FF00)
-                        .setTitle('🛒 경매장 새 매물 등록!')
-                        .setDescription(`<@${seller.discord_id}>님이 새로운 매물을 등록했습니다!\n\n**[${rarity}] ${itemName}**\n💰 시작가: **${auction.start_price.toLocaleString()} P**\n⏳ 마감: <t:${Math.floor(new Date(auction.end_at).getTime() / 1000)}:R>`)
-                        .setTimestamp();
+                const embed = new EmbedBuilder()
+                    .setColor(0x00FF00)
+                    .setTitle('🛒 경매장 새 매물 등록!')
+                    .setDescription(`<@${seller.discord_id}>님이 새로운 매물을 등록했습니다!\n\n**[${rarity}] ${itemName}**\n💰 시작가: **${auction.start_price.toLocaleString()} P**\n⏳ 마감: <t:${Math.floor(new Date(auction.end_at).getTime() / 1000)}:R>`)
+                    .setTimestamp();
 
-                    if (thumb) embed.setThumbnail(thumb);
+                if (thumb) embed.setThumbnail(thumb);
 
-                    await channel.send({ content: `📢 **새로운 경매 매물 등록**`, embeds: [embed] });
-                } catch (error) { console.error('🚨 경매 등록 알림 에러:', error); }
-            }
-        ).subscribe();
+                await channel.send({ content: `📢 **새로운 경매 매물 등록**`, embeds: [embed] });
+            } catch (error) { console.error('🚨 경매 등록 알림 에러:', error); }
+        }
+    );
 
-    // 📡 [MVP] 관리자 웹 MVP 승인 감지 및 DM 발송
-    supabase.channel('mvp-insert-listener')
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mvp_transactions' },
-            async (payload) => {
-                console.log('🔔 [디버그] DB 결제 내역(INSERT) 감지 성공:', payload.new); // 🌟 감지 성공 로그
+    // 3. [MVP 감지] 관리자 웹 MVP 승인 감지 및 DM 발송
+    dbChannel.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'mvp_transactions' },
+        async (payload) => {
+            console.log('🔔 [디버그] DB 결제 내역(INSERT) 감지 성공:', payload.new);
+            try {
+                const tx = payload.new;
+                const { data: player } = await supabase.from('players').select('discord_id, mvp_expires_at').eq('id', tx.user_id).single();
                 
-                try {
-                    const tx = payload.new;
-                    const { data: player } = await supabase.from('players').select('discord_id, mvp_expires_at').eq('id', tx.user_id).single();
-                    
-                    if (!player || !player.discord_id) {
-                        console.log(`🚨 [디버그] 해당 유저(${tx.user_id})의 디스코드 ID가 DB에 없습니다.`);
-                        return;
-                    }
+                if (!player || !player.discord_id) {
+                    console.log(`🚨 [디버그] 해당 유저(${tx.user_id})의 디스코드 ID가 DB에 없습니다.`);
+                    return;
+                }
 
-                    // 디스코드에서 유저 정보 가져오기
-                    const user = await client.users.fetch(player.discord_id).catch(() => null);
-                    
-                    const expDateStr = new Date(player.mvp_expires_at).toLocaleString('ko-KR', { 
-                        year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' 
-                    });
+                const user = await client.users.fetch(player.discord_id).catch(() => null);
+                
+                const expDateStr = new Date(player.mvp_expires_at).toLocaleString('ko-KR', { 
+                    year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+                });
 
-                    const embed = new EmbedBuilder()
-                        .setColor(0xFFD700)
-                        .setTitle(`👑 MVP ${tx.package_days}일권 혜택 적용 완료!`)
-                        .setDescription(`MVP 혜택이 성공적으로 적용되었습니다!\n\n🎁 **지급된 보너스:** +${tx.bonus_points.toLocaleString()} P\n⏳ **혜택 만료 일시:** ${expDateStr}\n\n후원해 주셔서 감사합니다!`);
+                const embed = new EmbedBuilder()
+                    .setColor(0xFFD700)
+                    .setTitle(`👑 MVP ${tx.package_days}일권 혜택 적용 완료!`)
+                    .setDescription(`MVP 혜택이 성공적으로 적용되었습니다!\n\n🎁 **지급된 보너스:** +${tx.bonus_points.toLocaleString()} P\n⏳ **혜택 만료 일시:** ${expDateStr}\n\n후원해 주셔서 감사합니다!`);
 
-                    const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
+                const noticeChannel = client.channels.cache.get(COMMAND_NOTICE_CHANNEL_ID);
 
-                    // 🌟 1. 유저를 찾은 경우 (DM 시도)
-                    if (user) {
-                        try {
-                            await user.send({ embeds: [embed] });
-                            console.log(`✅ [디버그] ${player.discord_id} 님에게 DM 발송 성공!`);
-                        } catch (err) {
-                            console.error(`🚨 [디버그] DM 발송 실패 (차단 등 사유):`, err.message);
-                            if (noticeChannel) {
-                                await noticeChannel.send({ 
-                                    content: `📢 <@${player.discord_id}>님, DM이 차단되어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
-                                    embeds: [embed] 
-                                });
-                                console.log(`✅ [디버그] 대체 채널 우회 발송 완료`);
-                            }
-                        }
-                    } 
-                    // 🌟 2. 유저를 아예 못 찾은 경우 (무조건 대체 채널로 즉시 우회)
-                    else {
-                        console.error(`🚨 [디버그] 봇이 디스코드 서버에서 유저(${player.discord_id})를 찾을 수 없습니다.`);
+                if (user) {
+                    try {
+                        await user.send({ embeds: [embed] });
+                        console.log(`✅ [디버그] ${player.discord_id} 님에게 DM 발송 성공!`);
+                    } catch (err) {
+                        console.error(`🚨 [디버그] DM 발송 실패 (차단 등 사유):`, err.message);
                         if (noticeChannel) {
                             await noticeChannel.send({ 
-                                content: `📢 <@${player.discord_id}>님, 봇이 디스코드 프로필을 찾을 수 없어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
+                                content: `📢 <@${player.discord_id}>님, DM이 차단되어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
                                 embeds: [embed] 
                             });
-                            console.log(`✅ [디버그] 대체 채널 우회 발송 완료 (유저 미발견 사유)`);
+                            console.log(`✅ [디버그] 대체 채널 우회 발송 완료`);
                         }
                     }
-                } catch (error) { 
-                    console.error('🚨 MVP 지급 알림 전체 로직 에러:', error); 
+                } else {
+                    console.error(`🚨 [디버그] 봇이 디스코드 서버에서 유저(${player.discord_id})를 찾을 수 없습니다.`);
+                    if (noticeChannel) {
+                        await noticeChannel.send({ 
+                            content: `📢 <@${player.discord_id}>님, 봇이 디스코드 프로필을 찾을 수 없어 이곳에 알립니다! MVP 혜택이 정상 적용되었습니다.`, 
+                            embeds: [embed] 
+                        });
+                        console.log(`✅ [디버그] 대체 채널 우회 발송 완료 (유저 미발견 사유)`);
+                    }
                 }
+            } catch (error) { 
+                console.error('🚨 MVP 지급 알림 전체 로직 에러:', error); 
             }
-        ).subscribe((status) => {
-            // 🌟 봇이 켜질 때 DB 감지 기능이 정상 연결되었는지 확인하는 로그
-            console.log(`📡 [디버그] MVP 결제 감지(Realtime) 연결 상태: ${status}`);
-        });
+        }
+    );
+
+    // 🌟 최종 1회 구독 및 상태 모니터링
+    dbChannel.subscribe((status) => {
+        console.log(`📡 [디버그] Supabase Realtime 통합 연결 상태: ${status}`);
+        if (status === 'TIMED_OUT') {
+            console.error('🚨 [장애] 웹소켓 연결 시간 초과! 네트워크 연결이 원활하지 않습니다.');
+        }
+    });
 
     // ⏰ [자동 알림] 1분마다 경매 마감 체크
     const announcedAuctions = new Set();

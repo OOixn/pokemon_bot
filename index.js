@@ -48,8 +48,8 @@ for (const file of commandFiles) {
 // 4. 채널 ID 설정
 // ==========================================
 const AUCTION_CHANNEL_ID     = '1494514674547298448';       // 경매 등록/낙찰 알림
-const MVP_NOTICE_CHANNEL_ID  = '1494509385391673436';       // MVP 결제 완료 알림
-const MVP_EXPIRE_CHANNEL_ID  = '1494509385391673436';       // MVP 만료 알림
+const MVP_NOTICE_CHANNEL_ID  = '1496664479998677133';       // MVP 결제 완료 알림
+const MVP_EXPIRE_CHANNEL_ID  = '1496664479998677133';       // MVP 만료 알림
 
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
